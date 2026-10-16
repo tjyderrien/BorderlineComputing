@@ -49,3 +49,24 @@ At the end the script lists bigger items it does not remove automatically, becau
 - Step 4 removes any package apt considers unused, including old kernels. Check the list in the dry run first; the running kernel (`uname -r`) is never removed.
 - Emptying the Trash is permanent.
 - Some sizes, paths and notes (the `/dev/sda6` root, `/media/thibault/Data`, the 5.15 kernel) are specific to the machine the script was written for. Adjust them before using it elsewhere.
+
+### `TurnOffIPv6.sh`
+
+Turns off IPv6 on the Wi-Fi interface. Useful when Google Scholar fails to load because of an IPv4/IPv6 conflict.
+
+#### Usage
+
+```bash
+bash TurnOffIPv6.sh   # asks for your sudo password
+```
+
+It runs `sudo sysctl -w net.ipv6.conf.wlan0.disable_ipv6=1` on the `wlan0` interface.
+
+#### Caveats
+
+- The interface name is hard-coded to `wlan0`. Check yours with `ip link` and edit the script if it differs.
+- The change lasts until the next reboot. To turn IPv6 back on before that:
+
+  ```bash
+  sudo sysctl -w net.ipv6.conf.wlan0.disable_ipv6=0
+  ```
