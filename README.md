@@ -1,6 +1,12 @@
 # BorderlineComputing
 Suite of tools that are necessary to prolong lifetime of computers to infinite.
 
+## What I'm listening to
+
+<!-- SPOTIFY:START -->
+Nothing played recently.
+<!-- SPOTIFY:END -->
+
 ## Tools
 
 ### `free-disk-space.sh`
@@ -70,3 +76,46 @@ It runs `sudo sysctl -w net.ipv6.conf.wlan0.disable_ipv6=1` on the `wlan0` inter
   ```bash
   sudo sysctl -w net.ipv6.conf.wlan0.disable_ipv6=0
   ```
+
+### Spotify integration
+
+Two parts tell people what I am listening to:
+
+- **Commit messages.** The `.githooks/commit-msg` hook adds a trailer with the track playing in the Spotify desktop app, for example
+  `Listening-To: Daft Punk - Veridis Quo <https://open.spotify.com/track/...>`.
+  It reads Spotify over D-Bus (MPRIS), so it needs no account setup. Nothing is added when Spotify is closed, paused or playing an ad, and the hook never blocks a commit.
+- **README.** The `Spotify now playing` GitHub Action runs every 30 minutes, calls the Spotify Web API and rewrites the block between the `SPOTIFY` markers above with the current track and the last 5 played. It commits only when the block changes.
+
+#### Setup
+
+Turn on the commit hook in each clone (it needs `busctl` and `python3`):
+
+```bash
+git config core.hooksPath .githooks
+SPOTIFY_TRAILER=off git commit ...   # skip it for one commit
+```
+
+For the README action:
+
+1. Create an app at <https://developer.spotify.com/dashboard> and add `http://127.0.0.1:8888/callback` as a redirect URI.
+2. Get a refresh token (opens a browser, read-only scopes):
+
+   ```bash
+   python3 spotify/get_refresh_token.py
+   ```
+
+3. Store the three values as repository secrets:
+
+   ```bash
+   gh secret set SPOTIFY_CLIENT_ID
+   gh secret set SPOTIFY_CLIENT_SECRET
+   gh secret set SPOTIFY_REFRESH_TOKEN
+   ```
+
+4. Run it once from the Actions tab (`Spotify now playing` > Run workflow) or with `gh workflow run spotify-now-playing.yml`.
+
+#### Caveats
+
+- The bot pushes to `main`, so run `git pull --rebase` before pushing your own work.
+- GitHub may delay scheduled runs by several minutes, so "Now playing" can lag.
+- Until the secrets are set, the action only logs a warning.
