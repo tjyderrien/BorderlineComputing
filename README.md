@@ -1,6 +1,10 @@
 # BorderlineComputing
 Suite of tools that are necessary to prolong lifetime of computers to infinite.
 
+Small scripts that keep computers usable for longer: they free disk space, turn off IPv6, show what you're listening to on Spotify in the README, and check and fix a machine's setup for working on remote Linux servers.
+
+*Inspiration: in 2024, after a memory chip failed in Voyager 1's 1970s flight computer, NASA engineers moved its code to other parts of memory, from 24 billion km away. Every command took 22.5 hours to arrive. I wish I could bring back Voyager I to Earth with that code.*
+
 ## What I'm listening to
 
 <!-- SPOTIFY:START -->
@@ -122,7 +126,7 @@ For the README action:
 
 ### `env-sharpness.py`
 
-Measures how "sharp" a computer is for working on remote Linux servers (FZU workstations, clusters), and lists what to fix. A sharp machine gets you from intent to a working shell, file or remote desktop with no password, no retyped IP address, no dropped connection and no command that behaves differently from the server.
+Measures how "sharp" a computer is for working on remote Linux servers (workstations, clusters), and lists what to fix. A sharp machine gets you from intent to a working shell, file or remote desktop with no password, no retyped IP address, no dropped connection and no command that behaves differently from the server.
 
 It uses only the Python standard library and runs on Linux and macOS.
 
@@ -196,22 +200,37 @@ Nothing changes without `--apply`.
 
 Fixes come in three layers. All of them are allowed by default; `--layers` restricts them.
 
-| Layer | Fix | What it does |
-|---|---|---|
-| core | `ssh-defaults` | `Host *` block at the end of `~/.ssh/config`: ControlMaster, ControlPersist 10m, ServerAliveInterval 30 (plus keychain on macOS) |
-| core | `history` | 100,000-line shell history |
-| core | `user-bin` | fzf 0.56.3 and ripgrep 14.1.1 in `~/.local/bin`, downloaded from their GitHub releases and checked against pinned SHA-256 sums, plus the fzf key bindings |
-| core | `aliases` | ten portable aliases (`ll`, `la`, `..`, `h`, `path`...) |
-| core | `vim` | `~/.vimrc` with `syntax on` and Vim's own defaults (incremental search, ruler, filetype indent), as Ubuntu has them; macOS's vim has neither |
-| macos | `gnu-tools` | `brew install coreutils gnu-sed grep findutils`, and their `gnubin` directories first in PATH |
-| macos | `bash`, `rsync` | bash 5 and rsync 3 from Homebrew (macOS ships bash 3.2 and openrsync) |
-| macos | `fuse-sshfs` | FUSE-T and its sshfs: no kernel extension, no reboot. Asks for your password |
-| macos | `xquartz` | XQuartz, for `ssh -X`. Asks for your password |
-| workstation | `toolkit` | clones TailScale-Monitor and ClaudeXplorer into `~/Documents` (if missing) and links `tailmon`, `claude-explorer` and `env-sharpness` into `~/.local/bin` |
-| workstation | `mounts` | `tailmon mount`: every server under `/media/tailscale`, or `~/tailscale` on macOS. Needs `fuse-sshfs` on macOS and `toolkit`, which are planned with it |
-| workstation | `keyboard` | French AZERTY (PC) as default layout plus Czech: GNOME input sources on Linux; on macOS the *French – PC* input source instead of Apple's *French*, which places symbols differently |
+**core**: only your home directory, with no sudo and no background service, so it is meant for shared computing centres too.
 
-The core layer touches only your home directory, with no sudo and no background service, so it is meant for shared computing centres too. The macos layer needs [Homebrew](https://brew.sh), which asks for your password once when you install it. Fixes that ask for a password are skipped, with a note, when the script is not run from a terminal.
+| Fix | What it does |
+|---|---|
+| `ssh-defaults` | `Host *` block at the end of `~/.ssh/config`: ControlMaster, ControlPersist 10m, ServerAliveInterval 30 (plus keychain on macOS) |
+| `history` | 100,000-line shell history |
+| `user-bin` | fzf 0.56.3 and ripgrep 14.1.1 in `~/.local/bin`, with the fzf key bindings. Downloaded from their GitHub releases and checked against pinned SHA-256 sums |
+| `aliases` | ten portable aliases (`ll`, `la`, `..`, `h`, `path`...) |
+| `vim` | `~/.vimrc` with `syntax on` and Vim's own defaults (incremental search, ruler, filetype indent), as on Ubuntu |
+
+**macos**: needs [Homebrew](https://brew.sh), which asks for your password once when you install it.
+
+| Fix | What it does |
+|---|---|
+| `gnu-tools` | GNU coreutils, sed, grep and findutils, first in PATH |
+| `bash` | bash 5 (macOS ships 3.2) |
+| `rsync` | rsync 3 (macOS ships openrsync) |
+| `fuse-sshfs` | FUSE-T and its sshfs: no kernel extension, no reboot. Asks for your password |
+| `xquartz` | XQuartz, for `ssh -X`. Asks for your password |
+
+**workstation**: the machine you sit at.
+
+| Fix | What it does |
+|---|---|
+| `toolkit` | clones TailScale-Monitor and ClaudeXplorer into `~/Documents` (if missing) and links `tailmon`, `claude-explorer` and `env-sharpness` into `~/.local/bin` |
+| `mounts` | `tailmon mount`: every server under `/media/tailscale` (`~/tailscale` on macOS). Brings in `toolkit`, and `fuse-sshfs` on macOS |
+| `keyboard` | French AZERTY (PC) as default layout, plus Czech. GNOME input sources on Linux; on macOS the *French – PC* input source, not Apple's *French*, which places symbols differently |
+
+Fixes that ask for a password are skipped, with a note, when the script is not run from a terminal.
+
+Customizations, such as other fixes, keyboard layouts or a target for your own machines, can be developed on request.
 
 Each change to a file is a block between `# >>> setup-env: <name> >>>` and `# <<< setup-env: <name> <<<` (`"` instead of `#` in `~/.vimrc`), so you can see it, and `--undo` removes it with the links and binaries. Homebrew packages and cloned repositories stay. Every file is backed up as `<file>.bak-setup-env-<date>` before it is changed. PATH changes go to `~/.zprofile` with zsh, so that non-interactive login shells, such as `tailmon sharpness`, see them too.
 
