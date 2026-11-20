@@ -4,7 +4,7 @@ Suite of tools that are necessary to prolong lifetime of computers to infinite.
 
 Two ideas behind it:
 
-1. **Old computers stay useful.** A ten-year-old laptop is still a perfectly good machine for a shell, an editor and a remote desktop. What makes people replace it is rarely the hardware: it is a full disk, a network quirk, a device that won't stay connected, a keyboard that half works.
+1. **Old computers stay useful.** A ten-year-old laptop is still a perfectly good machine for a shell, an editor and a remote desktop. What makes people replace it is rarely the processor: it is a full disk, a network quirk, a device that won't stay connected, a keyboard that half works, or a **broken screen**. A laptop with a cracked or dead screen still works perfectly with an external monitor, or with no screen at all, as a machine you reach over SSH or a remote desktop from any other one, which is exactly what the second idea prepares.
 2. **Every machine on your network feels the same, whichever Unix it runs.** An old Ubuntu laptop, a new Mac, a lab server running another distribution, an account on a computing centre: on each one the same tools, the same shell habits and the same SSH setup should just work, and each should reach and mount the others without a password. Then it no longer matters which machine you happen to sit at, and the old one is as good a door into your work as the new one.
 
 The scripts are small, readable, and change nothing without telling you.
@@ -217,6 +217,10 @@ Customizations, such as other fixes, keyboard layouts or a target for your own m
 ## Keeping old machines usable
 
 Small fixes for the problems that make a working computer feel finished: a full disk, a network quirk, devices that won't stay connected, a keyboard that half works.
+
+**A broken screen is not one of them.** Plug in an external monitor, or keep the laptop closed on a shelf and use it from another machine: once [`setup-env.py`](#setup-envpy) has given it the same SSH setup as the rest, you log in to it without a password, mount its disk with `tailmon mount`, and see it in `tailmon htop`. Its processor, memory and disk keep working for you.
+
+To keep a Linux laptop awake with the lid closed, set `HandleLidSwitch=ignore` (and `HandleLidSwitchExternalPower=ignore`) in `/etc/systemd/logind.conf`, then `sudo systemctl restart systemd-logind`.
 
 ### `free-disk-space.sh`
 
