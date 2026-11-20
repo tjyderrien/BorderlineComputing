@@ -119,3 +119,40 @@ For the README action:
 - The bot pushes to `main`, so run `git pull --rebase` before pushing your own work.
 - GitHub may delay scheduled runs by several minutes, so "Now playing" can lag.
 - Until the secrets are set, the action only logs a warning.
+
+### `env-sharpness.py`
+
+Measures how "sharp" a computer is for working on remote Linux servers (FZU workstations, clusters), and lists what to fix. A sharp machine gets you from intent to a working shell, file or remote desktop with no password, no retyped IP address, no dropped connection and no command that behaves differently from the server.
+
+It uses only the Python standard library and runs on Linux and macOS.
+
+#### Usage
+
+```bash
+./env-sharpness.py --hosts biatri-1,biatri-2,luzicka   # servers to check (default: Host aliases in ~/.ssh/config)
+./env-sharpness.py -v                                   # also list the checks that pass
+./env-sharpness.py --offline                            # no network checks
+./env-sharpness.py --json asus.json                     # save the results
+./env-sharpness.py --compare asus.json mac.json         # differences between two machines, largest first
+```
+
+To compare two machines, run it on each one with the same `--hosts` and `--json`, copy one JSON file to the other machine, and run `--compare`. Run it from a normal terminal, not through `ssh`, so it sees your real ssh-agent, PATH and mounts.
+
+#### What it measures
+
+Each check scores 0-100 %. Checks are weighted inside six categories, and the overall score is the mean of the categories.
+
+| Category | Checks |
+|---|---|
+| Reaching the servers | Tailscale/VPN running; TCP connect time to each server |
+| Logging in without friction | SSH key, key permissions, agent; `ssh -o BatchMode=yes <host> true` works with no password, and how long it takes |
+| SSH ergonomics | Host aliases for every server, ControlMaster, ServerAliveInterval, tmux/screen/mosh, X server, VNC viewer |
+| Remote files | sshfs, rsync 3.x, each server mounted locally and how fast the mount answers |
+| Toolchain parity | git, vim, python3, conda, gnuplot, rg, jq, htop, gh, claude; GNU (not BSD) sed/grep/find/date; bash 4 or later |
+| Shell | bash as login shell, history size, ssh commands in history, personal aliases, fzf |
+
+The network checks only open a TCP connection and run `true` on each server. Nothing on the computer is changed.
+
+#### Typical Mac weaknesses it finds
+
+macOS ships BSD `sed`/`date`/`find`, bash 3.2 and an old rsync, so commands copied from the servers behave differently. It has no sshfs without macFUSE or FUSE-T, uses zsh by default (bash aliases do not carry over), and starts with an empty shell history. The script prints the `brew` command for each of these.

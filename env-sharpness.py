@@ -1,0 +1,507 @@
+#!/usr/bin/env python3
+"""Measure how "sharp" this computer is for working on remote Linux servers.
+
+A sharp machine gets you from intent to a working shell (or file, or desktop)
+on a server with no passwords, no retyped hostnames, no dropped connections
+and no tools that behave differently from the server's. This script checks
+that, gives a score out of 100 per category and overall, and lists the fixes
+that would raise it.
+
+Only the Python standard library is used (Python 3.6+, Linux and macOS).
+It only reads: the only network actions are TCP connects and
+`ssh -o BatchMode=yes <host> true` to the hosts you are checking.
+
+    ./env-sharpness.py                                  # hosts from ~/.ssh/config
+    ./env-sharpness.py --hosts biatri-1,biatri-2,luzicka
+    ./env-sharpness.py --offline                        # no network checks
+    ./env-sharpness.py --json asus.json                 # also save the results
+    ./env-sharpness.py --compare asus.json mac.json     # what one has, the other lacks
+"""
+
+import argparse
+import json
+import os
+import platform
+import re
+import shutil
+import socket
+import stat
+import subprocess
+import sys
+import threading
+import time
+from pathlib import Path
+
+HOME = Path.home()
+IS_MAC = platform.system() == "Darwin"
+FORGES = ("github.com", "gitlab.com", "gitlab.org", "bitbucket.org")
+
+CATEGORIES = [
+    ("network", "Reaching the servers"),
+    ("auth", "Logging in without friction"),
+    ("ssh", "SSH ergonomics"),
+    ("files", "Remote files"),
+    ("tools", "Toolchain parity with the servers"),
+    ("shell", "Shell"),
+]
+
+
+# ---------------------------------------------------------------- helpers ----
+
+def run(cmd, timeout=10):
+    """Run cmd, return (exit code, stdout+stderr, seconds). Never raises."""
+    t0 = time.monotonic()
+    try:
+        p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                           stdin=subprocess.DEVNULL, timeout=timeout, universal_newlines=True)
+        return p.returncode, p.stdout, time.monotonic() - t0
+    except subprocess.TimeoutExpired:
+        return 124, "timeout", time.monotonic() - t0
+    except OSError as e:
+        return 127, str(e), time.monotonic() - t0
+
+
+def have(name):
+    return shutil.which(name) is not None
+
+
+def ramp(x, good, bad):
+    """1.0 when x <= good, 0.0 when x >= bad, linear in between."""
+    if x is None:
+        return 0.0
+    if x <= good:
+        return 1.0
+    if x >= bad:
+        return 0.0
+    return (bad - x) / (bad - good)
+
+
+def with_timeout(fn, seconds):
+    """Run fn in a thread so a hung network mount cannot freeze the script."""
+    box = {}
+
+    def target():
+        try:
+            box["value"] = fn()
+        except Exception as e:  # noqa: BLE001 - any failure just means "not working"
+            box["error"] = e
+    t = threading.Thread(target=target, daemon=True)
+    t.start()
+    t.join(seconds)
+    if t.is_alive() or "error" in box:
+        return None
+    return box["value"]
+
+
+def rc_text():
+    """All shell startup files concatenated (bash and zsh)."""
+    text = ""
+    for name in (".bashrc", ".bash_profile", ".bash_aliases", ".profile",
+                 ".zshrc", ".zprofile", ".zshenv"):
+        try:
+            text += (HOME / name).read_text(errors="replace") + "\n"
+        except OSError:
+            pass
+    return text
+
+
+class Report:
+    def __init__(self):
+        self.checks = []  # dicts: cat, name, weight, value, detail, fix
+
+    def add(self, cat, name, weight, value, detail="", fix=""):
+        value = max(0.0, min(1.0, float(value)))
+        self.checks.append(dict(cat=cat, name=name, weight=weight,
+                                value=round(value, 3), detail=detail,
+                                fix=fix if value < 0.999 else ""))
+
+    def score(self, cat=None):
+        cs = [c for c in self.checks if cat is None or c["cat"] == cat]
+        w = sum(c["weight"] for c in cs)
+        if not w:
+            return None
+        if cat is None:  # overall = mean of category scores, so no category dominates
+            s = [self.score(k) for k, _ in CATEGORIES]
+            s = [x for x in s if x is not None]
+            return round(sum(s) / len(s), 1)
+        return round(100 * sum(c["weight"] * c["value"] for c in cs) / w, 1)
+
+
+# ------------------------------------------------------------- ssh config ----
+
+def ssh_aliases():
+    """First alias of every non-wildcard Host block in ~/.ssh/config."""
+    out = []
+    try:
+        lines = (HOME / ".ssh" / "config").read_text(errors="replace").splitlines()
+    except OSError:
+        return out
+    for line in lines:
+        m = re.match(r"\s*Host\s+(.+)", line, re.I)
+        if not m:
+            continue
+        names = [n for n in m.group(1).split() if not any(ch in n for ch in "*?!")]
+        if names:
+            out.append((names[0], names))
+    return out
+
+
+def ssh_effective(host):
+    """Effective ssh options for host, from `ssh -G` (lower-case keys)."""
+    rc, out, _ = run(["ssh", "-G", host], timeout=5)
+    opts = {}
+    if rc == 0:
+        for line in out.splitlines():
+            k, _, v = line.partition(" ")
+            opts.setdefault(k.lower(), v.strip())
+    return opts
+
+
+def default_hosts():
+    hosts = []
+    for first, _names in ssh_aliases():
+        hn = ssh_effective(first).get("hostname", first)
+        if not hn.endswith(FORGES) and first not in FORGES:
+            hosts.append(first)
+    return hosts
+
+
+# ----------------------------------------------------------------- checks ----
+
+def check_network(r, hosts, offline):
+    ts = have("tailscale")
+    running = False
+    if ts:
+        rc, out, _ = run(["tailscale", "status", "--json"], timeout=5)
+        try:
+            running = rc == 0 and json.loads(out).get("BackendState") == "Running"
+        except ValueError:
+            running = False
+    vpn = any(have(x) for x in ("openconnect", "openvpn", "wg"))
+    r.add("network", "Overlay network or VPN up", 3,
+          1 if running else (0.5 if (ts or vpn) else 0),
+          "tailscale running" if running else ("tailscale installed, not running" if ts
+                                               else ("VPN client installed" if vpn else "none")),
+          "Install Tailscale and log in (`tailscale up`): servers are then reachable "
+          "from anywhere, by name, with no VPN to start.")
+    if offline:
+        return
+    for h in hosts:
+        opts = ssh_effective(h)
+        hn, port = opts.get("hostname", h), int(opts.get("port", 22) or 22)
+        t0 = time.monotonic()
+        try:
+            socket.create_connection((hn, port), timeout=3).close()
+            ms = 1000 * (time.monotonic() - t0)
+            r.add("network", f"{h}: port {port} reachable", 2, ramp(ms, 30, 400),
+                  f"TCP connect {ms:.0f} ms", f"{h} is slow to reach ({ms:.0f} ms): "
+                  "check `tailscale status` shows a direct (not relayed) connection.")
+        except OSError as e:
+            r.add("network", f"{h}: port {port} reachable", 2, 0, f"unreachable ({e})",
+                  f"{h} ({hn}) cannot be reached: VPN/Tailscale down, or wrong HostName.")
+
+
+def check_auth(r, hosts, offline):
+    sshdir = HOME / ".ssh"
+    keys = [p for p in sshdir.glob("id_*") if not p.name.endswith(".pub")] if sshdir.is_dir() else []
+    r.add("auth", "SSH key pair exists", 3, 1 if keys else 0,
+          ", ".join(sorted(k.name for k in keys)) or "none",
+          "Create a key: `ssh-keygen -t ed25519`, then `ssh-copy-id <host>` for each server.")
+    bad = []
+    if sshdir.is_dir() and stat.S_IMODE(sshdir.stat().st_mode) & 0o077:
+        bad.append("~/.ssh")
+    bad += [k.name for k in keys if stat.S_IMODE(k.stat().st_mode) & 0o077]
+    r.add("auth", "Private key permissions strict", 1, 0 if bad else 1,
+          "too open: " + ", ".join(bad) if bad else "ok",
+          "`chmod 700 ~/.ssh && chmod 600 ~/.ssh/id_*` (ssh ignores keys others can read).")
+    rc, out, _ = run(["ssh-add", "-l"], timeout=5)
+    n = len([l for l in out.splitlines() if l.strip()]) if rc == 0 else 0
+    usekc = IS_MAC and re.search(r"(?im)^\s*UseKeychain\s+yes", _read(sshdir / "config"))
+    r.add("auth", "Keys loaded in an agent", 1, 1 if (n or usekc) else 0,
+          f"{n} key(s) in agent" + (", UseKeychain yes" if usekc else ""),
+          "Add `AddKeysToAgent yes`" + (" and `UseKeychain yes`" if IS_MAC else "") +
+          " under `Host *` in ~/.ssh/config so a key passphrase is typed once per session.")
+    if offline:
+        return
+    for h in hosts:
+        rc, out, sec = run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", h, "true"],
+                           timeout=15)
+        if rc == 0:
+            r.add("auth", f"{h}: login with no password", 4, 1, f"ok in {sec:.2f} s")
+            r.add("auth", f"{h}: time to shell", 2, ramp(sec, 0.4, 3.0), f"{sec:.2f} s",
+                  f"Login to {h} takes {sec:.1f} s: enable ControlMaster (see SSH "
+                  "ergonomics) and `GSSAPIAuthentication no` if the server doesn't use Kerberos.")
+        else:
+            why = out.strip().splitlines()[-1] if out.strip() else f"exit {rc}"
+            hint = (f"Run `ssh-copy-id {h}` once." if "ermission denied" in why else
+                    f"Connect once interactively (`ssh {h}`) to accept its host key."
+                    if "verification" in why else f"Fix login to {h}: {why}")
+            r.add("auth", f"{h}: login with no password", 4, 0, why[:80], hint)
+
+
+def _read(p):
+    try:
+        return Path(p).read_text(errors="replace")
+    except OSError:
+        return ""
+
+
+def check_ssh(r, hosts):
+    aliases = {n for _first, names in ssh_aliases() for n in names}
+    if hosts:
+        named = [h for h in hosts if h in aliases]
+        r.add("ssh", "Servers have Host aliases in ~/.ssh/config", 3, len(named) / len(hosts),
+              f"{len(named)}/{len(hosts)}: missing " + ", ".join(sorted(set(hosts) - set(named)))
+              if len(named) < len(hosts) else f"{len(named)}/{len(hosts)}",
+              "Add a `Host <short-name>` block with HostName, User and IdentityFile for each "
+              "server: `ssh biatri-1` instead of `ssh user@10.26.212.34 -i ...`. Copy the "
+              "blocks from your sharpest machine.")
+    sample = ssh_effective(hosts[0] if hosts else "localhost")
+    cm = sample.get("controlmaster", "false") not in ("false", "no")
+    cp = sample.get("controlpersist", "no") not in ("no", "false", "0")
+    r.add("ssh", "Connection sharing (ControlMaster)", 2, (cm + cp) / 2,
+          f"ControlMaster {sample.get('controlmaster', '?')}, ControlPersist "
+          f"{sample.get('controlpersist', '?')}",
+          "Under `Host *`: `ControlMaster auto`, `ControlPath ~/.ssh/cm-%C`, "
+          "`ControlPersist 10m`. Second ssh/scp/rsync/sshfs to a host then starts instantly.")
+    sai = int(sample.get("serveraliveinterval", "0") or 0)
+    r.add("ssh", "Keep-alive (ServerAliveInterval)", 2, 1 if 0 < sai <= 120 else 0,
+          f"{sai} s" if sai else "off",
+          "Under `Host *`: `ServerAliveInterval 30` and `ServerAliveCountMax 4`, so idle "
+          "sessions survive NAT/Wi-Fi timeouts and dead ones fail fast instead of freezing.")
+    r.add("ssh", "Resilient sessions (mosh, tmux or screen)", 1,
+          1 if any(have(x) for x in ("mosh", "tmux", "screen")) else 0,
+          ", ".join(x for x in ("mosh", "tmux", "screen") if have(x)) or "none",
+          "Install tmux (and run long jobs inside tmux on the server); mosh survives "
+          "sleep and network changes.")
+    x11 = (Path("/opt/X11").exists() or Path("/Applications/Utilities/XQuartz.app").exists()) \
+        if IS_MAC else bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+    r.add("ssh", "X server for `ssh -X` graphics", 1, 1 if x11 else 0,
+          "present" if x11 else "missing",
+          "Install XQuartz (`brew install --cask xquartz`)" if IS_MAC else "Run from a graphical session.")
+    vnc = [x for x in ("vncviewer", "remmina", "xtightvncviewer", "tigervnc") if have(x)]
+    if IS_MAC:
+        vnc.append("Screen Sharing (vnc://)")  # built in
+    r.add("ssh", "Remote desktop client (VNC)", 1, 1 if vnc else 0, ", ".join(vnc) or "none",
+          "Install a VNC viewer (TigerVNC or Remmina).")
+
+
+def sshfs_mounts():
+    """{mountpoint: source} for sshfs/FUSE network mounts."""
+    rc, out, _ = run(["mount"], timeout=5)
+    mounts = {}
+    for line in out.splitlines():
+        m = re.match(r"(\S+@?\S*:\S*) on (.+?) (?:type \S*sshfs|\((?:macfuse|osxfuse|fuse-t))", line)
+        if m:
+            mounts[m.group(2)] = m.group(1)
+    return mounts
+
+
+def check_files(r, hosts, offline):
+    sshfs = have("sshfs")
+    r.add("files", "sshfs installed", 2, 1 if sshfs else 0, shutil.which("sshfs") or "missing",
+          "macOS: install macFUSE or FUSE-T, then sshfs (`brew install --cask macfuse` + "
+          "`brew install gromgit/fuse/sshfs-mac`)." if IS_MAC else "`sudo apt install sshfs`")
+    rc, out, _ = run(["rsync", "--version"], timeout=5)
+    m = re.search(r"version\s+v?(\d+)\.(\d+)", out)
+    ver = (int(m.group(1)), int(m.group(2))) if m else None
+    r.add("files", "rsync 3.x", 2, 1 if ver and ver >= (3, 0) else (0.4 if rc == 0 else 0),
+          "openrsync" if "openrsync" in out else (f"{ver[0]}.{ver[1]}" if ver else "missing"),
+          "`brew install rsync` (macOS ships an old rsync/openrsync lacking --info=progress2, "
+          "-A, -X...)." if IS_MAC else "`sudo apt install rsync`")
+    mounts = sshfs_mounts()
+    if not hosts:
+        return
+    for h in hosts:
+        opts = ssh_effective(h)
+        names = {h, opts.get("hostname", "")}
+        mp = next((p for p, src in mounts.items()
+                   if src.split("@")[-1].split(":")[0] in names), None)
+        if not mp:
+            r.add("files", f"{h}: mounted locally", 2, 0, "not mounted",
+                  f"`mkdir -p ~/mnt/{h} && sshfs {h}:/ ~/mnt/{h} -o reconnect,"
+                  "ServerAliveInterval=15` - then open server files in local apps.")
+            continue
+        if offline:
+            r.add("files", f"{h}: mounted locally", 2, 1, mp)
+            continue
+        t0 = time.monotonic()
+        ok = with_timeout(lambda: os.listdir(mp), 5) is not None
+        sec = time.monotonic() - t0
+        r.add("files", f"{h}: mounted locally", 2, ramp(sec, 0.3, 3.0) if ok else 0.2,
+              f"{mp} ({sec:.2f} s to list)" if ok else f"{mp} (stale/hung)",
+              f"Remount {mp}: `fusermount -u {mp}` (Linux) / `umount {mp}` (macOS), then "
+              "sshfs again with `-o reconnect`.")
+
+
+TOOLS = [  # (command, weight, why, how on mac, how on linux)
+    ("git", 2, "version control", "xcode-select --install", "sudo apt install git"),
+    ("vim", 1, "same editor as on the servers", "built in", "sudo apt install vim"),
+    ("python3", 2, "scripting/analysis", "brew install python", "sudo apt install python3"),
+    ("conda", 1, "same Python environments as the servers",
+     "install Miniforge", "install Miniforge"),
+    ("gnuplot", 1, "quick plots of server output", "brew install gnuplot", "sudo apt install gnuplot"),
+    ("rg", 1, "fast search", "brew install ripgrep", "sudo apt install ripgrep"),
+    ("jq", 1, "JSON on the command line", "brew install jq", "sudo apt install jq"),
+    ("htop", 1, "watching jobs", "brew install htop", "sudo apt install htop"),
+    ("gh", 1, "GitHub from the terminal", "brew install gh", "sudo apt install gh"),
+    ("claude", 1, "Claude Code", "npm i -g @anthropic-ai/claude-code", "npm i -g @anthropic-ai/claude-code"),
+]
+
+
+def check_tools(r):
+    for cmd, w, why, mac, lin in TOOLS:
+        r.add("tools", f"{cmd} ({why})", w, 1 if have(cmd) else 0,
+              shutil.which(cmd) or "missing", f"`{mac if IS_MAC else lin}`")
+    gnu = []
+    for cmd in ("sed", "grep", "find", "date", "readlink", "stat"):
+        rc, out, _ = run([cmd, "--version"], timeout=5)
+        gnu.append(cmd if rc == 0 and ("GNU" in out or "Free Software" in out) else None)
+    good = [c for c in gnu if c]
+    r.add("tools", "GNU coreutils/sed/grep/find (as on the servers)", 4, len(good) / len(gnu),
+          f"GNU: {len(good)}/{len(gnu)}" + ("" if len(good) == len(gnu) else
+                                            " (BSD versions behave differently: sed -i, date -d...)"),
+          "`brew install coreutils gnu-sed grep findutils` and put their `gnubin` dirs first "
+          "in PATH, so commands copied from the servers work unchanged.")
+    rc, out, _ = run(["bash", "--version"], timeout=5)
+    m = re.search(r"version (\d+)", out)
+    bv = int(m.group(1)) if m else 0
+    r.add("tools", "bash >= 4 (as on the servers)", 2, 1 if bv >= 4 else 0, f"bash {bv or '?'}",
+          "`brew install bash` (macOS ships bash 3.2 from 2007: no associative arrays, "
+          "no `mapfile`, `${x,,}`...).")
+
+
+def check_shell(r):
+    rc = rc_text()
+    shell = Path(os.environ.get("SHELL", "")).name
+    r.add("shell", "Same login shell as the servers (bash)", 1, 1 if shell == "bash" else 0.5,
+          shell or "?", "Either `chsh -s /bin/bash`, or keep zsh but port your bash "
+          "aliases/functions to ~/.zshrc.")
+    m = re.findall(r"(?:HISTSIZE|SAVEHIST)=(\d+)", rc)
+    hs = max((int(x) for x in m), default=500)
+    r.add("shell", "Long shell history", 2, ramp(-hs, -50000, -1000), f"{hs} lines",
+          "Set `HISTSIZE=100000` and `HISTFILESIZE=100000` (bash) or `SAVEHIST=100000` "
+          "(zsh): Ctrl+R then finds the long command you ran on that server weeks ago.")
+    hist = _read(HOME / ".bash_history") + _read(HOME / ".zsh_history")
+    n = len([l for l in hist.splitlines() if re.search(r"\bssh\b", l)])
+    r.add("shell", "History actually holds remote work", 1, ramp(-n, -100, 0),
+          f"{n} ssh commands in history",
+          "Nothing to install: this rises as you use the machine. Copying your history "
+          "file from the sharper machine gives Ctrl+R its memory at once.")
+    aliases = len(re.findall(r"(?m)^\s*alias\s+\w", rc))
+    funcs = len(re.findall(r"(?m)^\s*(?:function\s+\w+|\w[\w-]*\s*\(\)\s*\{)", rc))
+    r.add("shell", "Personal aliases/functions", 2, ramp(-(aliases + funcs), -15, 0),
+          f"{aliases} aliases, {funcs} functions",
+          "Copy your aliases from the sharper machine; better, keep them in one file in a "
+          "git repo and source it from both ~/.bashrc and ~/.zshrc.")
+    fz = have("fzf")
+    r.add("shell", "Fuzzy history/file search (fzf)", 1, 1 if fz else 0, "yes" if fz else "no",
+          "`brew install fzf`" if IS_MAC else "`sudo apt install fzf`")
+
+
+# ----------------------------------------------------------------- output ----
+
+C = sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
+
+
+def color(s, v):
+    if not C:
+        return s
+    code = "32" if v >= 0.999 else ("33" if v > 0.3 else "31")
+    return f"\033[{code}m{s}\033[0m"
+
+
+def bar(score, width=20):
+    n = round(width * score / 100)
+    return "#" * n + "." * (width - n)
+
+
+def print_report(data, verbose):
+    print(f"\nEnvironment sharpness: {data['machine']} ({data['os']})")
+    print(f"Hosts checked: {', '.join(data['hosts']) or 'none'}\n")
+    checks = data["checks"]
+    for key, title in CATEGORIES:
+        cs = [c for c in checks if c["cat"] == key]
+        if not cs:
+            continue
+        s = data["scores"][key]
+        print(f"{title:<36} {bar(s)} {color(f'{s:5.1f}', s / 100)}")
+        for c in cs:
+            if verbose or c["value"] < 0.999:
+                mark = "ok" if c["value"] >= 0.999 else f"{100 * c['value']:.0f}%"
+                print(f"    {color(f'{mark:>4}', c['value'])}  {c['name']}  [{c['detail']}]")
+    print(f"\n{'OVERALL':<36} {bar(data['overall'])} {data['overall']:5.1f} / 100\n")
+    fixes = sorted((c for c in checks if c["fix"]),
+                   key=lambda c: -c["weight"] * (1 - c["value"]))
+    if fixes:
+        print("Biggest gains first:")
+        for i, c in enumerate(fixes[:12], 1):
+            print(f"  {i:2}. {c['fix']}")
+        print()
+
+
+def compare(a_path, b_path):
+    a, b = (json.loads(Path(p).read_text()) for p in (a_path, b_path))
+    print(f"\n{'':<50} {a['machine'][:14]:>14} {b['machine'][:14]:>14}")
+    for key, title in CATEGORIES:
+        print(f"{title:<50} {a['scores'].get(key) or 0:>14.1f} {b['scores'].get(key) or 0:>14.1f}")
+    print(f"{'OVERALL':<50} {a['overall']:>14.1f} {b['overall']:>14.1f}\n")
+    av = {c["name"]: c for c in a["checks"]}
+    bv = {c["name"]: c for c in b["checks"]}
+    rows = []
+    for name in list(av) + [n for n in bv if n not in av]:
+        x, y = av.get(name), bv.get(name)
+        vx, vy = (x or {}).get("value"), (y or {}).get("value")
+        if vx != vy and (vx is None or vy is None or abs(vx - vy) > 0.15):
+            w = (x or y)["weight"]
+            rows.append((w * abs((vx or 0) - (vy or 0)), name, x, y))
+    if not rows:
+        print("No meaningful differences.")
+        return
+    print("Differences (largest impact first):")
+    for _, name, x, y in sorted(rows, key=lambda t: -t[0]):
+        fx = "-" if x is None else f"{100 * x['value']:.0f}%"
+        fy = "-" if y is None else f"{100 * y['value']:.0f}%"
+        print(f"  {name[:48]:<48} {fx:>14} {fy:>14}")
+        worse = y if (y and (x is None or y["value"] < x["value"])) else x
+        if worse and worse.get("fix"):
+            print(f"      -> {worse['fix']}")
+    print()
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap.add_argument("--hosts", help="comma-separated servers to check "
+                    "(default: Host aliases in ~/.ssh/config, minus GitHub/GitLab/Bitbucket)")
+    ap.add_argument("--offline", action="store_true", help="skip all network checks")
+    ap.add_argument("--json", metavar="FILE", help="also save the results as JSON")
+    ap.add_argument("--compare", nargs=2, metavar=("A.json", "B.json"),
+                    help="compare two saved results and stop")
+    ap.add_argument("-v", "--verbose", action="store_true", help="also list passed checks")
+    args = ap.parse_args()
+
+    if args.compare:
+        compare(*args.compare)
+        return
+    hosts = [h.strip() for h in args.hosts.split(",") if h.strip()] if args.hosts else default_hosts()
+
+    r = Report()
+    check_network(r, hosts, args.offline)
+    check_auth(r, hosts, args.offline)
+    check_ssh(r, hosts)
+    check_files(r, hosts, args.offline)
+    check_tools(r)
+    check_shell(r)
+
+    data = dict(machine=socket.gethostname().split(".")[0], os=f"{platform.system()} {platform.release()}",
+                date=time.strftime("%Y-%m-%d %H:%M"), hosts=hosts, offline=args.offline,
+                scores={k: r.score(k) for k, _ in CATEGORIES}, overall=r.score(),
+                checks=r.checks)
+    print_report(data, args.verbose)
+    if args.json:
+        Path(args.json).write_text(json.dumps(data, indent=1))
+        print(f"Saved to {args.json}")
+
+
+if __name__ == "__main__":
+    main()
