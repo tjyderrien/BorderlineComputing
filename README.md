@@ -241,3 +241,7 @@ Each change to a file is a block between `# >>> setup-env: <name> >>>` and `# <<
 - Mounts do not survive a reboot: run `tailmon mount` again.
 - `user-bin` needs to reach github.com. On a cluster without Internet access that fix fails and the others still apply.
 - Not yet tried on IT4I. It only writes to `$HOME`, but check the plan there before `--apply`.
+
+## Related projects
+
+- [internet-train-coverage](https://github.com/tjyderrien/internet-train-coverage): measures Wi-Fi and internet quality along train trips with very little test data (about 5 MB/h), on a Mac or an Android phone, and turns each trip into a 1D map along the track. Useful for seeing whether dead zones come from the infrastructure or from the weather.
