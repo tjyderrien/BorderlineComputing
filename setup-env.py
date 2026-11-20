@@ -428,7 +428,8 @@ ACTIONS = [
     Action("vim", "core", [es.VIM_LABEL], "vim with colours and Vim's defaults (~/.vimrc)", lambda f: do_vim(),
            blocks=[(HOME / ".vimrc", "vim")]),
     Action("gnu-tools", "macos", ["GNU coreutils/sed/grep/find (as on the servers)"],
-           "GNU coreutils/sed/grep/findutils, first in PATH", lambda f: do_gnu_tools(), os="mac"),
+           "GNU coreutils/sed/grep/findutils, first in PATH", lambda f: do_gnu_tools(), os="mac",
+           blocks=[(shell_profile, "gnu-tools")]),
     Action("bash", "macos", ["bash >= 4 (as on the servers)"], "bash 5 (macOS has 3.2)",
            lambda f: brew("install", "bash") or "bash", os="mac"),
     Action("rsync", "macos", ["rsync 3.x"], "rsync 3 (macOS has openrsync)",
@@ -464,10 +465,12 @@ def measure(args):
         cmd.append("--offline")
     env = dict(os.environ)  # measure with the PATH a new shell will have
     extra = [str(BIN)]
-    if IS_MAC:  # what the gnu-tools block puts first
+    if IS_MAC:
         prefix = os.environ.get("HOMEBREW_PREFIX", "/opt/homebrew")
-        extra = ["%s/opt/%s/libexec/gnubin" % (prefix, d) for d in ("coreutils", "gnu-sed", "grep", "findutils")
-                 ] + [prefix + "/bin"] + extra
+        extra = [prefix + "/bin"] + extra
+        if BY_NAME["gnu-tools"].applied():  # what the gnu-tools block puts first, once it is there
+            extra = ["%s/opt/%s/libexec/gnubin" % (prefix, d)
+                     for d in ("coreutils", "gnu-sed", "grep", "findutils")] + extra
     have = env.get("PATH", "").split(os.pathsep)
     env["PATH"] = os.pathsep.join([d for d in extra if d not in have and os.path.isdir(d)] + have)
     out = subprocess.run(cmd, stdout=subprocess.PIPE, universal_newlines=True, check=True, env=env).stdout
