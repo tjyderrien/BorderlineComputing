@@ -36,6 +36,17 @@ HOME = Path.home()
 IS_MAC = platform.system() == "Darwin"
 FORGES = ("github.com", "gitlab.com", "gitlab.org", "bitbucket.org")
 
+# What a machine is for decides what it is judged on. A workstation is where you sit: it must reach,
+# log in to and mount everything. A server is worked *on*: it needs a good shell and SSH, not a VNC
+# viewer. An hpc machine is a shared computing centre you don't administer (IT4I...): no sudo, no
+# daemons, so only what one user can set up in $HOME is checked.
+ROLES = ("workstation", "server", "hpc")
+TARGETS = {"workstation": 90, "server": 80, "hpc": 70}
+ALL = ROLES
+WS = ("workstation",)
+NOT_HPC = ("workstation", "server")
+ROLE = "workstation"  # set in main()
+
 CATEGORIES = [
     ("network", "Reaching the servers"),
     ("auth", "Logging in without friction"),
@@ -43,6 +54,7 @@ CATEGORIES = [
     ("files", "Remote files"),
     ("tools", "Toolchain parity with the servers"),
     ("shell", "Shell"),
+    ("toolkit", "Your toolkit (TailMon & co.)"),
 ]
 
 
@@ -109,22 +121,36 @@ class Report:
     def __init__(self):
         self.checks = []  # dicts: cat, name, weight, value, detail, fix
 
-    def add(self, cat, name, weight, value, detail="", fix=""):
+    def add(self, cat, name, weight, value, detail="", fix="", roles=ALL):
+        if ROLE not in roles:
+            return
         value = max(0.0, min(1.0, float(value)))
         self.checks.append(dict(cat=cat, name=name, weight=weight,
                                 value=round(value, 3), detail=detail,
                                 fix=fix if value < 0.999 else ""))
 
     def score(self, cat=None):
-        cs = [c for c in self.checks if cat is None or c["cat"] == cat]
-        w = sum(c["weight"] for c in cs)
-        if not w:
-            return None
-        if cat is None:  # overall = mean of category scores, so no category dominates
-            s = [self.score(k) for k, _ in CATEGORIES]
-            s = [x for x in s if x is not None]
-            return round(sum(s) / len(s), 1)
-        return round(100 * sum(c["weight"] * c["value"] for c in cs) / w, 1)
+        return score(self.checks, cat)
+
+
+def score(checks, cat=None):
+    """Score of one category, or overall (the mean of the categories, so no category dominates)."""
+    if cat is None:
+        s = [score(checks, k) for k, _ in CATEGORIES]
+        s = [x for x in s if x is not None]
+        return round(sum(s) / len(s), 1) if s else None
+    cs = [c for c in checks if c["cat"] == cat]
+    w = sum(c["weight"] for c in cs)
+    return round(100 * sum(c["weight"] * c["value"] for c in cs) / w, 1) if w else None
+
+
+def detect_role():
+    """Best guess of what this machine is for; override with --role."""
+    if IS_MAC or run(["systemctl", "is-active", "display-manager"], timeout=5)[1].strip() == "active":
+        return "workstation"
+    shared = os.environ.get("LMOD_CMD") or os.environ.get("MODULESHOME") or have("sbatch") or have("qsub")
+    admin = set(run(["id", "-Gn"], timeout=5)[1].split()) & {"sudo", "wheel", "admin", "root"}
+    return "hpc" if shared and not admin else "server"
 
 
 # ------------------------------------------------------------- ssh config ----
@@ -157,13 +183,53 @@ def ssh_effective(host):
     return opts
 
 
+def tailnet():
+    """(this machine's name, [online Linux peers]) from Tailscale, or (None, []) without it."""
+    if not have("tailscale"):
+        return None, []
+    rc, out, _ = run(["tailscale", "status", "--json"], timeout=5)
+    try:
+        st = json.loads(out) if rc == 0 else {}
+    except ValueError:
+        return None, []
+
+    def name(p):
+        return (p.get("DNSName") or "").split(".")[0] or p.get("HostName", "")
+    me = name(st.get("Self") or {}) or None
+    peers = [name(p) for p in (st.get("Peer") or {}).values()
+             if p.get("OS") == "linux" and p.get("Online")]
+    return me, sorted(peers)
+
+
 def default_hosts():
+    """Online Linux machines of the tailnet; without Tailscale, the hosts in ~/.ssh/config."""
+    _me, peers = tailnet()
+    if peers:
+        return peers
     hosts = []
     for first, _names in ssh_aliases():
         hn = ssh_effective(first).get("hostname", first)
         if not hn.endswith(FORGES) and first not in FORGES:
             hosts.append(first)
     return hosts
+
+
+def find_agent():
+    """Use the desktop session's ssh-agent when SSH_AUTH_SOCK is unset (e.g. run over ssh by tailmon)."""
+    if os.environ.get("SSH_AUTH_SOCK"):
+        return
+    if IS_MAC:
+        cands = [run(["launchctl", "getenv", "SSH_AUTH_SOCK"], timeout=5)[1].strip()]
+    else:
+        d = "/run/user/%d" % os.getuid()
+        cands = [d + "/keyring/ssh", d + "/gcr/ssh", d + "/openssh_agent", d + "/ssh-agent.socket"]
+    for c in cands:
+        try:
+            if c and stat.S_ISSOCK(os.stat(c).st_mode):
+                os.environ["SSH_AUTH_SOCK"] = c
+                return
+        except OSError:
+            pass
 
 
 # ----------------------------------------------------------------- checks ----
@@ -183,7 +249,7 @@ def check_network(r, hosts, offline):
           "tailscale running" if running else ("tailscale installed, not running" if ts
                                                else ("VPN client installed" if vpn else "none")),
           "Install Tailscale and log in (`tailscale up`): servers are then reachable "
-          "from anywhere, by name, with no VPN to start.")
+          "from anywhere, by name, with no VPN to start.", roles=NOT_HPC)
     if offline:
         return
     for h in hosts:
@@ -220,7 +286,7 @@ def check_auth(r, hosts, offline):
     r.add("auth", "Keys loaded in an agent", 1, 1 if (n or usekc) else 0,
           f"{n} key(s) in agent" + (", UseKeychain yes" if usekc else ""),
           "Add `AddKeysToAgent yes`" + (" and `UseKeychain yes`" if IS_MAC else "") +
-          " under `Host *` in ~/.ssh/config so a key passphrase is typed once per session.")
+          " under `Host *` in ~/.ssh/config so a key passphrase is typed once per session.", roles=WS)
     if offline:
         return
     for h in hosts:
@@ -278,12 +344,12 @@ def check_ssh(r, hosts):
         if IS_MAC else bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
     r.add("ssh", "X server for `ssh -X` graphics", 1, 1 if x11 else 0,
           "present" if x11 else "missing",
-          "Install XQuartz (`brew install --cask xquartz`)" if IS_MAC else "Run from a graphical session.")
+          "Install XQuartz (`brew install --cask xquartz`)" if IS_MAC else "Run from a graphical session.", roles=WS)
     vnc = [x for x in ("vncviewer", "remmina", "xtightvncviewer", "tigervnc") if have(x)]
     if IS_MAC:
         vnc.append("Screen Sharing (vnc://)")  # built in
     r.add("ssh", "Remote desktop client (VNC)", 1, 1 if vnc else 0, ", ".join(vnc) or "none",
-          "Install a VNC viewer (TigerVNC or Remmina).")
+          "Install a VNC viewer (TigerVNC or Remmina).", roles=WS)
 
 
 def sshfs_mounts():
@@ -301,7 +367,7 @@ def check_files(r, hosts, offline):
     sshfs = have("sshfs")
     r.add("files", "sshfs installed", 2, 1 if sshfs else 0, shutil.which("sshfs") or "missing",
           "macOS: install macFUSE or FUSE-T, then sshfs (`brew install --cask macfuse` + "
-          "`brew install gromgit/fuse/sshfs-mac`)." if IS_MAC else "`sudo apt install sshfs`")
+          "`brew install gromgit/fuse/sshfs-mac`)." if IS_MAC else "`sudo apt install sshfs`", roles=WS)
     rc, out, _ = run(["rsync", "--version"], timeout=5)
     m = re.search(r"version\s+v?(\d+)\.(\d+)", out)
     ver = (int(m.group(1)), int(m.group(2))) if m else None
@@ -334,25 +400,25 @@ def check_files(r, hosts, offline):
               "sshfs again with `-o reconnect`.")
 
 
-TOOLS = [  # (command, weight, why, how on mac, how on linux)
+TOOLS = [  # (command, weight, why, how on mac, how on linux[, roles])
     ("git", 2, "version control", "xcode-select --install", "sudo apt install git"),
     ("vim", 1, "same editor as on the servers", "built in", "sudo apt install vim"),
     ("python3", 2, "scripting/analysis", "brew install python", "sudo apt install python3"),
     ("conda", 1, "same Python environments as the servers",
-     "install Miniforge", "install Miniforge"),
-    ("gnuplot", 1, "quick plots of server output", "brew install gnuplot", "sudo apt install gnuplot"),
+     "install Miniforge", "install Miniforge", NOT_HPC),
+    ("gnuplot", 1, "quick plots of server output", "brew install gnuplot", "sudo apt install gnuplot", NOT_HPC),
     ("rg", 1, "fast search", "brew install ripgrep", "sudo apt install ripgrep"),
     ("jq", 1, "JSON on the command line", "brew install jq", "sudo apt install jq"),
     ("htop", 1, "watching jobs", "brew install htop", "sudo apt install htop"),
-    ("gh", 1, "GitHub from the terminal", "brew install gh", "sudo apt install gh"),
-    ("claude", 1, "Claude Code", "npm i -g @anthropic-ai/claude-code", "npm i -g @anthropic-ai/claude-code"),
+    ("gh", 1, "GitHub from the terminal", "brew install gh", "sudo apt install gh", WS),
+    ("claude", 1, "Claude Code", "npm i -g @anthropic-ai/claude-code", "npm i -g @anthropic-ai/claude-code", WS),
 ]
 
 
 def check_tools(r):
-    for cmd, w, why, mac, lin in TOOLS:
+    for cmd, w, why, mac, lin, *roles in TOOLS:
         r.add("tools", f"{cmd} ({why})", w, 1 if have(cmd) else 0,
-              shutil.which(cmd) or "missing", f"`{mac if IS_MAC else lin}`")
+              shutil.which(cmd) or "missing", f"`{mac if IS_MAC else lin}`", roles=roles[0] if roles else ALL)
     gnu = []
     for cmd in ("sed", "grep", "find", "date", "readlink", "stat"):
         rc, out, _ = run([cmd, "--version"], timeout=5)
@@ -387,16 +453,45 @@ def check_shell(r):
     r.add("shell", "History actually holds remote work", 1, ramp(-n, -100, 0),
           f"{n} ssh commands in history",
           "Nothing to install: this rises as you use the machine. Copying your history "
-          "file from the sharper machine gives Ctrl+R its memory at once.")
+          "file from the sharper machine gives Ctrl+R its memory at once.", roles=WS)
     aliases = len(re.findall(r"(?m)^\s*alias\s+\w", rc))
     funcs = len(re.findall(r"(?m)^\s*(?:function\s+\w+|\w[\w-]*\s*\(\)\s*\{)", rc))
-    r.add("shell", "Personal aliases/functions", 2, ramp(-(aliases + funcs), -15, 0),
+    r.add("shell", "Personal aliases/functions", 2, ramp(-(aliases + funcs), -10, 0),
           f"{aliases} aliases, {funcs} functions",
           "Copy your aliases from the sharper machine; better, keep them in one file in a "
           "git repo and source it from both ~/.bashrc and ~/.zshrc.")
     fz = have("fzf")
     r.add("shell", "Fuzzy history/file search (fzf)", 1, 1 if fz else 0, "yes" if fz else "no",
           "`brew install fzf`" if IS_MAC else "`sudo apt install fzf`")
+
+
+REPOS = "https://github.com/tjyderrien/"
+
+
+def check_toolkit(r):
+    tm = shutil.which("tailmon")
+    r.add("toolkit", "tailmon (monitor, search, grep, mount the tailnet)", 3, 1 if tm else 0,
+          tm or "missing",
+          "`git clone %sTailScale-Monitor ~/Documents/Tail-Monitor.main && ln -s "
+          "~/Documents/Tail-Monitor.main/tailmon.py ~/.local/bin/tailmon`" % REPOS, roles=WS)
+    try:
+        exe = json.loads(_read(HOME / ".config" / "tailmon.json") or "{}").get("claude_explorer")
+    except ValueError:
+        exe = None
+    ce = os.path.expanduser(exe) if exe and os.access(os.path.expanduser(exe), os.X_OK) \
+        else shutil.which("claude-explorer")
+    r.add("toolkit", "claude-explorer (`tailmon claude|todo|dispatch`)", 2, 1 if ce else 0,
+          ce or "missing",
+          "`git clone %sClaudeXplorer` and link its claude_explorer.py into ~/.local/bin as "
+          "claude-explorer (or set \"claude_explorer\" in ~/.config/tailmon.json)." % REPOS, roles=WS)
+    es = shutil.which("env-sharpness")
+    r.add("toolkit", "env-sharpness on the PATH (`tailmon sharpness`)", 1, 1 if es else 0,
+          es or "missing", "`ln -s ~/BorderlineComputing/env-sharpness.py ~/.local/bin/env-sharpness`", roles=WS)
+    root = Path("/media/tailscale")
+    ok = root.is_dir() and os.access(str(root), os.W_OK)
+    r.add("toolkit", "Mount root for `tailmon mount` (/media/tailscale)", 1, 1 if ok else 0,
+          "ready" if ok else ("not writable" if root.exists() else "missing"),
+          "`sudo install -d -o $USER -g $(id -gn) /media/tailscale`", roles=WS)
 
 
 # ----------------------------------------------------------------- output ----
@@ -418,7 +513,8 @@ def bar(score, width=20):
 
 def print_report(data, verbose):
     print(f"\nEnvironment sharpness: {data['machine']} ({data['os']})")
-    print(f"Hosts checked: {', '.join(data['hosts']) or 'none'}\n")
+    print(f"Role: {data['role']} (target {data['target']:g})   "
+          f"Hosts checked: {', '.join(data['hosts']) or 'none'}\n")
     checks = data["checks"]
     for key, title in CATEGORIES:
         cs = [c for c in checks if c["cat"] == key]
@@ -430,7 +526,9 @@ def print_report(data, verbose):
             if verbose or c["value"] < 0.999:
                 mark = "ok" if c["value"] >= 0.999 else f"{100 * c['value']:.0f}%"
                 print(f"    {color(f'{mark:>4}', c['value'])}  {c['name']}  [{c['detail']}]")
-    print(f"\n{'OVERALL':<36} {bar(data['overall'])} {data['overall']:5.1f} / 100\n")
+    ok = data["overall"] > data["target"]
+    print(f"\n{'OVERALL':<36} {bar(data['overall'])} {data['overall']:5.1f} / 100   "
+          + color(f"{'above' if ok else 'below'} target {data['target']:g}", 1 if ok else 0) + "\n")
     fixes = sorted((c for c in checks if c["fix"]),
                    key=lambda c: -c["weight"] * (1 - c["value"]))
     if fixes:
@@ -474,16 +572,30 @@ def main():
     ap.add_argument("--hosts", help="comma-separated servers to check "
                     "(default: Host aliases in ~/.ssh/config, minus GitHub/GitLab/Bitbucket)")
     ap.add_argument("--offline", action="store_true", help="skip all network checks")
-    ap.add_argument("--json", metavar="FILE", help="also save the results as JSON")
+    ap.add_argument("--json", metavar="FILE", help="also save the results as JSON (`-`: print only the JSON, for tailmon)")
     ap.add_argument("--compare", nargs=2, metavar=("A.json", "B.json"),
                     help="compare two saved results and stop")
+    ap.add_argument("--role", choices=ROLES, help="what this machine is for (default: guessed; "
+                    "workstation if it has a desktop, hpc on a shared cluster without sudo, else server)")
+    ap.add_argument("--target", type=float, help="score to exceed (default: %s)"
+                    % ", ".join("%s %d" % kv for kv in TARGETS.items()))
+    ap.add_argument("--check", dest="min_exit", action="store_true",
+                    help="exit with status 1 when the score does not exceed the target (for scripts, cron)")
     ap.add_argument("-v", "--verbose", action="store_true", help="also list passed checks")
     args = ap.parse_args()
 
     if args.compare:
         compare(*args.compare)
         return
-    hosts = [h.strip() for h in args.hosts.split(",") if h.strip()] if args.hosts else default_hosts()
+    global ROLE
+    ROLE = args.role or detect_role()
+    target = args.target if args.target is not None else TARGETS[ROLE]
+    # Only a workstation is judged on reaching the others; servers and clusters are reached.
+    if ROLE != "workstation":
+        hosts = []
+    else:
+        hosts = [h.strip() for h in args.hosts.split(",") if h.strip()] if args.hosts else default_hosts()
+    find_agent()
 
     r = Report()
     check_network(r, hosts, args.offline)
@@ -492,15 +604,23 @@ def main():
     check_files(r, hosts, args.offline)
     check_tools(r)
     check_shell(r)
+    check_toolkit(r)
 
-    data = dict(machine=socket.gethostname().split(".")[0], os=f"{platform.system()} {platform.release()}",
+    me, _peers = tailnet()
+    data = dict(machine=me or socket.gethostname().split(".")[0], os=f"{platform.system()} {platform.release()}",
                 date=time.strftime("%Y-%m-%d %H:%M"), hosts=hosts, offline=args.offline,
+                role=ROLE, target=target,
                 scores={k: r.score(k) for k, _ in CATEGORIES}, overall=r.score(),
                 checks=r.checks)
-    print_report(data, args.verbose)
-    if args.json:
-        Path(args.json).write_text(json.dumps(data, indent=1))
-        print(f"Saved to {args.json}")
+    if args.json == "-":  # machine-readable only, for `tailmon sharpness` and setup-env.py
+        print(json.dumps(data))
+    else:
+        print_report(data, args.verbose)
+        if args.json:
+            Path(args.json).write_text(json.dumps(data, indent=1))
+            print(f"Saved to {args.json}")
+    if args.min_exit and (data["overall"] or 0) <= target:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -129,18 +129,22 @@ It uses only the Python standard library and runs on Linux and macOS.
 #### Usage
 
 ```bash
-./env-sharpness.py --hosts biatri-1,biatri-2,luzicka   # servers to check (default: Host aliases in ~/.ssh/config)
+./env-sharpness.py --hosts biatri-1,biatri-2,luzicka   # servers to check (default: online Linux tailnet machines)
+./env-sharpness.py --role server                        # judge it as a server (default: guessed)
+./env-sharpness.py --check                              # exit status 1 if not above the target (for scripts)
 ./env-sharpness.py -v                                   # also list the checks that pass
 ./env-sharpness.py --offline                            # no network checks
 ./env-sharpness.py --json asus.json                     # save the results
 ./env-sharpness.py --compare asus.json mac.json         # differences between two machines, largest first
 ```
 
+Without `--hosts` it checks the online Linux machines of your tailnet, or the hosts in `~/.ssh/config` when Tailscale is not running. `--json -` prints only the JSON; `tailmon sharpness` uses it to score every machine of the tailnet at once.
+
 To compare two machines, run it on each one with the same `--hosts` and `--json`, copy one JSON file to the other machine, and run `--compare`. Run it from a normal terminal, not through `ssh`, so it sees your real ssh-agent, PATH and mounts.
 
 #### What it measures
 
-Each check scores 0-100 %. Checks are weighted inside six categories, and the overall score is the mean of the categories.
+Each check scores 0-100 %. Checks are weighted inside seven categories, and the overall score is the mean of the categories.
 
 | Category | Checks |
 |---|---|
@@ -150,9 +154,57 @@ Each check scores 0-100 %. Checks are weighted inside six categories, and the ov
 | Remote files | sshfs, rsync 3.x, each server mounted locally and how fast the mount answers |
 | Toolchain parity | git, vim, python3, conda, gnuplot, rg, jq, htop, gh, claude; GNU (not BSD) sed/grep/find/date; bash 4 or later |
 | Shell | bash as login shell, history size, ssh commands in history, personal aliases, fzf |
+| Your toolkit | tailmon, claude-explorer, env-sharpness on the PATH; `/media/tailscale` ready for `tailmon mount` |
+
+#### Roles and targets
+
+Machines do not need to be identical, so each is judged on what it is for, and has a score to exceed:
+
+| Role | What it is | Judged on | Target |
+|---|---|---|---|
+| `workstation` | where you sit | everything, including reaching, logging in to and mounting the other machines | 90 |
+| `server` | a machine you work *on* | SSH settings, keys, tools, shell; not VNC, X or mounts | 80 |
+| `hpc` | a shared computing centre you don't administer (IT4I...) | only what one user can set up in `$HOME`: no Tailscale, no conda/gnuplot (they come from modules) | 70 |
+
+The role is guessed: a Mac or a machine running a display manager is a workstation; a machine with modules or a batch scheduler (`sbatch`, `qsub`) where you are not in `sudo`/`wheel` is `hpc`; anything else is a server. Override it with `--role`, and the target with `--target`.
 
 The network checks only open a TCP connection and run `true` on each server. Nothing on the computer is changed.
 
 #### Typical Mac weaknesses it finds
 
 macOS ships BSD `sed`/`date`/`find`, bash 3.2 and an old rsync, so commands copied from the servers behave differently. It has no sshfs without macFUSE or FUSE-T, uses zsh by default (bash aliases do not carry over), and starts with an empty shell history. The script prints the `brew` command for each of these.
+
+### `setup-env.py`
+
+Brings a machine above its sharpness target with as few changes as possible. It measures the machine with `env-sharpness.py` (which must sit next to it), then picks, among the fixes it knows, the smallest set that lifts the score above the role's target, biggest gain first, and stops there. A machine already above its target is left alone: machines may differ on purpose, and only the gaps that hurt get closed.
+
+#### Usage
+
+```bash
+./setup-env.py                          # plan: what would be done, and the predicted score
+./setup-env.py --apply                  # do it, then measure again
+./setup-env.py --all --apply            # every core fix, whatever the target
+./setup-env.py --role hpc --target 75   # same options as env-sharpness.py
+./setup-env.py --undo                   # remove every block and binary it added
+```
+
+Nothing changes without `--apply`.
+
+#### What it can fix (core layer)
+
+Everything happens in your home directory, with no sudo and no background service, so it is also meant for shared computing centres where you cannot install packages.
+
+| Fix | What it does |
+|---|---|
+| `ssh-defaults` | `Host *` block at the end of `~/.ssh/config`: ControlMaster, ControlPersist 10m, ServerAliveInterval 30 (plus keychain on macOS) |
+| `history` | 100,000-line shell history in `~/.bashrc` or `~/.zshrc` |
+| `user-bin` | fzf 0.56.3 and ripgrep 14.1.1 in `~/.local/bin`, downloaded from their GitHub releases and checked against pinned SHA-256 sums; `~/.local/bin` on the PATH and the fzf key bindings |
+| `aliases` | ten portable aliases (`ll`, `la`, `..`, `h`, `path`...) |
+
+Each change to a file is a block between `# >>> setup-env: <name> >>>` and `# <<< setup-env: <name> <<<`, so you can see it and `--undo` removes it. Every file is backed up as `<file>.bak-setup-env-<date>` before it is changed. Fixes that need sudo or Homebrew (sshfs, VNC, GNU tools on macOS) are not in this layer yet; when only those remain, it lists them.
+
+#### Caveats
+
+- Run it from a normal terminal on the machine itself. It needs Python 3.6 or later.
+- `user-bin` needs to reach github.com. On a cluster without Internet access that fix fails and the others still apply.
+- Not yet tried on IT4I. It only writes to `$HOME`, but check the plan there before `--apply`.
