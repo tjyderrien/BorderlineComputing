@@ -279,8 +279,11 @@ TOOLKIT = [("tailmon", "TailScale-Monitor", "Tail-Monitor.main", "tailmon.py"),
 def link(target, name):
     BIN.mkdir(parents=True, exist_ok=True)
     dest = BIN / name
-    if dest.is_symlink() or dest.exists():
-        return
+    if dest.exists():
+        return                                  # a working link or program: leave it
+    if dest.is_symlink():                       # a broken link (its target moved): replace it
+        print("  replacing broken link %s -> %s" % (dest, os.readlink(str(dest))))
+        dest.unlink()
     dest.symlink_to(target)
     record(str(dest))
 
