@@ -394,8 +394,11 @@ def check_files(r, hosts, offline):
     for h in hosts:
         opts = ssh_effective(h)
         names = {h, opts.get("hostname", "")}
+        # sshfs: "user@host:/path"; FUSE-T names the source after the volume instead: "fuse-t:/host"
         mp = next((p for p, src in mounts.items()
-                   if src.split("@")[-1].split(":")[0] in names), None)
+                   if src.split("@")[-1].split(":")[0] in names
+                   or (src.startswith("fuse-t:/") and src[8:].split("/")[0] in names)
+                   or os.path.basename(p) in names), None)
         if not mp:
             r.add("files", f"{h}: mounted locally", 2, 0, "not mounted",
                   f"`tailmon mount` (every server under {MOUNT_ROOT_LABEL}), or `mkdir -p ~/mnt/{h} && "
