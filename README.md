@@ -245,3 +245,7 @@ Each change to a file is a block between `# >>> setup-env: <name> >>>` and `# <<
 ## Related projects
 
 - [internet-train-coverage](https://github.com/tjyderrien/internet-train-coverage): measures Wi-Fi and internet quality along train trips with very little test data (about 5 MB/h), on a Mac or an Android phone, and turns each trip into a 1D map along the track. Useful for seeing whether dead zones come from the infrastructure or from the weather.
+
+## License
+
+MIT, see [LICENSE](LICENSE).
