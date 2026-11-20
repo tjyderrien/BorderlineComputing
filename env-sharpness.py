@@ -28,6 +28,7 @@ import socket
 import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -453,6 +454,27 @@ def check_tools(r):
           "no `mapfile`, `${x,,}`...).")
 
 
+VIM_LABEL = "vim shows colours (syntax on)"
+
+
+def vim_syntax_on():
+    """Start vim as you would (your vimrc and the system one), without a terminal, and ask whether syntax is on."""
+    if not have("vim"):
+        return None
+    out = Path(tempfile.mkdtemp()) / "syntax"
+    env = dict(os.environ, TERM="xterm-256color")
+    try:
+        subprocess.run(["vim", "--not-a-term", "-i", "NONE", "-c",
+                        "call writefile([exists('g:syntax_on')], '%s') | qa!" % out],
+                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       timeout=10, env=env)
+        return out.read_text().strip() == "1"
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    finally:
+        shutil.rmtree(str(out.parent), ignore_errors=True)
+
+
 def check_shell(r):
     rc = rc_text()
     shell = Path(os.environ.get("SHELL", "")).name
@@ -479,6 +501,11 @@ def check_shell(r):
     fz = have("fzf")
     r.add("shell", "Fuzzy history/file search (fzf)", 1, 1 if fz else 0, "yes" if fz else "no",
           "`brew install fzf`" if IS_MAC else "`sudo apt install fzf`")
+    vs = vim_syntax_on()
+    if vs is not None:
+        r.add("shell", VIM_LABEL, 1, 1 if vs else 0, "yes" if vs else "no (plain black and white)",
+              "Add `syntax on` to ~/.vimrc (on macOS also `unlet! skip_defaults_vim` and "
+              "`source $VIMRUNTIME/defaults.vim` before it), or run setup-env.py.")
 
 
 REPOS = "https://github.com/tjyderrien/"

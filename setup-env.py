@@ -61,7 +61,7 @@ spec.loader.exec_module(es)
 
 
 def block_re(name):
-    return re.compile(r"\n?# >>> setup-env: %s >>>\n.*?# <<< setup-env: %s <<<\n" % (name, name), re.S)
+    return re.compile(r"\n?[#\"] >>> setup-env: %s >>>\n.*?[#\"] <<< setup-env: %s <<<\n" % (name, name), re.S)
 
 
 def backup(path):
@@ -70,13 +70,13 @@ def backup(path):
         backup.done = getattr(backup, "done", set()) | {path}
 
 
-def put_block(path, name, body, mode=0o644):
-    """Add or replace the named block at the end of path."""
+def put_block(path, name, body, mode=0o644, comment="#"):
+    """Add or replace the named block at the end of path (comment: the file's comment sign, '"' in a vimrc)."""
     text = path.read_text() if path.exists() else ""
     new = block_re(name).sub("", text)
     if new and not new.endswith("\n"):
         new += "\n"
-    new += "\n# >>> setup-env: %s >>>\n%s\n# <<< setup-env: %s <<<\n" % (name, body.strip("\n"), name)
+    new += "\n%s >>> setup-env: %s >>>\n%s\n%s <<< setup-env: %s <<<\n" % (comment, name, body.strip("\n"), comment, name)
     if new != text:
         backup(path)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -89,7 +89,7 @@ def drop_blocks(path):
     if not path.exists():
         return False
     text = path.read_text()
-    new = re.sub(r"\n?# >>> setup-env: [\w-]+ >>>\n.*?# <<< setup-env: [\w-]+ <<<\n", "", text, flags=re.S)
+    new = re.sub(r"\n?[#\"] >>> setup-env: [\w-]+ >>>\n.*?[#\"] <<< setup-env: [\w-]+ <<<\n", "", text, flags=re.S)
     if new != text:
         backup(path)
         path.write_text(new)
@@ -212,6 +212,18 @@ def do_user_bin(missing):
     put_block(shell_rc(), "user-bin", 'command -v fzf >/dev/null 2>&1 && eval "$(fzf --%s 2>/dev/null)"'
               % ("zsh" if is_zsh() else "bash"))
     return "~/.local/bin: " + (", ".join(done) or "nothing new") + "; PATH and fzf keys"
+
+
+VIMRC = """" Vim as on the Linux machines: Ubuntu's /etc/vim/vimrc turns colours on and Vim's defaults.vim adds
+" incremental search, the ruler, filetype indent, back to the last position... macOS's skips both.
+unlet! skip_defaults_vim
+source $VIMRUNTIME/defaults.vim
+syntax on"""
+
+
+def do_vim():
+    put_block(HOME / ".vimrc", "vim", VIMRC, comment='"')
+    return "~/.vimrc: colours (syntax on) and Vim's defaults"
 
 
 def do_aliases():
@@ -395,7 +407,7 @@ class Action:
             return False
         for path, block in self.blocks:
             path = path() if callable(path) else path
-            if not path.exists() or "# >>> setup-env: %s >>>" % block not in path.read_text():
+            if not path.exists() or not re.search(r'[#"] >>> setup-env: %s >>>' % re.escape(block), path.read_text()):
                 return False
         return True
 
@@ -413,6 +425,8 @@ ACTIONS = [
            blocks=[(shell_rc, "user-bin")]),
     Action("aliases", "core", ["Personal aliases/functions"], "portable aliases", lambda f: do_aliases(),
            blocks=[(shell_rc, "aliases")]),
+    Action("vim", "core", [es.VIM_LABEL], "vim with colours and Vim's defaults (~/.vimrc)", lambda f: do_vim(),
+           blocks=[(HOME / ".vimrc", "vim")]),
     Action("gnu-tools", "macos", ["GNU coreutils/sed/grep/find (as on the servers)"],
            "GNU coreutils/sed/grep/findutils, first in PATH", lambda f: do_gnu_tools(), os="mac"),
     Action("bash", "macos", ["bash >= 4 (as on the servers)"], "bash 5 (macOS has 3.2)",
@@ -464,9 +478,10 @@ def predicted(checks, fixed_names):
     return es.score([dict(c, value=1.0) if c["name"] in fixed_names else c for c in checks])
 
 
-def plan(data, everything, layers):
+def plan(data, everything, layers, only=None):
     """Greedy: take the action (with the actions it needs) that raises the score most, until the target
-    is exceeded. Returns [(action, gain, score after)], final score."""
+    is exceeded (with `only`: just those actions, whatever the target). Returns [(action, gain, score after)],
+    final score."""
     checks, target = data["checks"], data["target"]
     failing = {c["name"] for c in checks if c["value"] < 0.999}
     here = {a.name for a in ACTIONS if a.runs_here(data["role"], layers)}
@@ -485,7 +500,9 @@ def plan(data, everything, layers):
             out += [x for x in sub if x not in out]
         return out + [a]
 
-    todo = [BY_NAME[n] for n in here if BY_NAME[n].fixes(failing) and not BY_NAME[n].applied()]
+    todo = [BY_NAME[n] for n in here if BY_NAME[n].fixes(failing) and not BY_NAME[n].applied()
+            and (not only or n in only)]
+    everything = everything or bool(only)
     chosen, fixed, score = [], set(), data["overall"]
     while todo and (everything or score <= target):
         taken = {a.name for a, _, _ in chosen}
@@ -505,7 +522,7 @@ def plan(data, everything, layers):
 
 
 def undo():
-    files = (HOME / ".ssh" / "config", HOME / ".bashrc", HOME / ".zshrc", HOME / ".zprofile")
+    files = (HOME / ".ssh" / "config", HOME / ".bashrc", HOME / ".zshrc", HOME / ".zprofile", HOME / ".vimrc")
     changed = [str(p) for p in files if drop_blocks(p)]
     removed = []
     if MANIFEST.exists():
@@ -532,8 +549,14 @@ def main():
                     % ", ".join("%s %d" % kv for kv in es.TARGETS.items()))
     ap.add_argument("--hosts", help="servers to measure against, as for env-sharpness.py")
     ap.add_argument("--offline", action="store_true", help="measure without network checks")
+    ap.add_argument("--only", metavar="FIX,FIX",
+                    help="just these fixes, whatever the target (names as in the plan: %s)"
+                         % ", ".join(a.name for a in ACTIONS))
     ap.add_argument("--undo", action="store_true", help="remove every block, binary and link this script added")
     args = ap.parse_args()
+    only = set(x for x in (args.only or "").split(",") if x)
+    if only - set(BY_NAME):
+        ap.error("unknown fix(es): %s" % ", ".join(sorted(only - set(BY_NAME))))
     if args.undo:
         return undo()
     layers = [l for l in args.layers.split(",") if l]
@@ -543,10 +566,10 @@ def main():
 
     data = measure(args)
     print("%s: %s, score %.1f, target %g" % (data["machine"], data["role"], data["overall"], data["target"]))
-    chosen, final = plan(data, args.all, layers)
+    chosen, final = plan(data, args.all, layers, only)
     if not chosen:
-        if args.all:
-            print("Every fix that applies here is already in place.")
+        if args.all or only:
+            print("Every fix asked for that applies here is already in place.")
         elif data["overall"] > data["target"]:
             print("Above target: nothing to do. (--all applies every fix anyway.)")
         else:
@@ -556,7 +579,7 @@ def main():
                 print("  - %s: %s" % (c["name"], c["fix"]))
         return
 
-    print("\nPlan (smallest set of fixes that clears the target):" if not args.all else "\nPlan:")
+    print("\nPlan:" if args.all or only else "\nPlan (smallest set of fixes that clears the target):")
     for a, gain, score in chosen:
         print("  %-11s %-12s %-56s +%4.1f -> %5.1f%s" % (a.layer, a.name, a.what, gain, score,
                                                        "  (asks your password)" if a.password else ""))

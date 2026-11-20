@@ -153,8 +153,8 @@ Each check scores 0-100 %. Checks are weighted inside seven categories, and the 
 | SSH ergonomics | Host aliases for every server, ControlMaster, ServerAliveInterval, tmux/screen/mosh, X server, VNC viewer |
 | Remote files | sshfs, rsync 3.x, each server mounted locally and how fast the mount answers |
 | Toolchain parity | git, vim, python3, conda, gnuplot, rg, jq, htop, gh, claude; GNU (not BSD) sed/grep/find/date; bash 4 or later |
-| Shell | bash as login shell, history size, ssh commands in history, personal aliases, fzf |
-| Your toolkit | tailmon, claude-explorer, env-sharpness on the PATH; `/media/tailscale` ready for `tailmon mount` |
+| Shell | bash as login shell, history size, ssh commands in history, personal aliases, fzf, vim with colours |
+| Your toolkit | tailmon, claude-explorer, env-sharpness on the PATH; `/media/tailscale` ready for `tailmon mount`; the same keyboard layouts everywhere (French AZERTY PC first, Czech) and, on macOS, an ISO keyboard type |
 
 #### Roles and targets
 
@@ -184,6 +184,7 @@ Brings a machine above its sharpness target with as few changes as possible. It 
 ./setup-env.py                          # plan: what would be done, and the predicted score
 ./setup-env.py --apply                  # do it, then measure again
 ./setup-env.py --all --apply            # every fix that applies here, whatever the target
+./setup-env.py --only vim,gnu-tools --apply   # just these fixes, whatever the target
 ./setup-env.py --layers core            # home-directory fixes only (computing centres)
 ./setup-env.py --role hpc --target 75   # same options as env-sharpness.py
 ./setup-env.py --undo                   # remove every block, binary and link it added
@@ -201,16 +202,18 @@ Fixes come in three layers. All of them are allowed by default; `--layers` restr
 | core | `history` | 100,000-line shell history |
 | core | `user-bin` | fzf 0.56.3 and ripgrep 14.1.1 in `~/.local/bin`, downloaded from their GitHub releases and checked against pinned SHA-256 sums, plus the fzf key bindings |
 | core | `aliases` | ten portable aliases (`ll`, `la`, `..`, `h`, `path`...) |
+| core | `vim` | `~/.vimrc` with `syntax on` and Vim's own defaults (incremental search, ruler, filetype indent), as Ubuntu has them; macOS's vim has neither |
 | macos | `gnu-tools` | `brew install coreutils gnu-sed grep findutils`, and their `gnubin` directories first in PATH |
 | macos | `bash`, `rsync` | bash 5 and rsync 3 from Homebrew (macOS ships bash 3.2 and openrsync) |
 | macos | `fuse-sshfs` | FUSE-T and its sshfs: no kernel extension, no reboot. Asks for your password |
 | macos | `xquartz` | XQuartz, for `ssh -X`. Asks for your password |
 | workstation | `toolkit` | clones TailScale-Monitor and ClaudeXplorer into `~/Documents` (if missing) and links `tailmon`, `claude-explorer` and `env-sharpness` into `~/.local/bin` |
 | workstation | `mounts` | `tailmon mount`: every server under `/media/tailscale`, or `~/tailscale` on macOS. Needs `fuse-sshfs` on macOS and `toolkit`, which are planned with it |
+| workstation | `keyboard` | French AZERTY (PC) as default layout plus Czech: GNOME input sources on Linux; on macOS the *French – PC* input source instead of Apple's *French*, which places symbols differently |
 
 The core layer touches only your home directory, with no sudo and no background service, so it is meant for shared computing centres too. The macos layer needs [Homebrew](https://brew.sh), which asks for your password once when you install it. Fixes that ask for a password are skipped, with a note, when the script is not run from a terminal.
 
-Each change to a file is a block between `# >>> setup-env: <name> >>>` and `# <<< setup-env: <name> <<<`, so you can see it, and `--undo` removes it with the links and binaries. Homebrew packages and cloned repositories stay. Every file is backed up as `<file>.bak-setup-env-<date>` before it is changed. PATH changes go to `~/.zprofile` with zsh, so that non-interactive login shells, such as `tailmon sharpness`, see them too.
+Each change to a file is a block between `# >>> setup-env: <name> >>>` and `# <<< setup-env: <name> <<<` (`"` instead of `#` in `~/.vimrc`), so you can see it, and `--undo` removes it with the links and binaries. Homebrew packages and cloned repositories stay. Every file is backed up as `<file>.bak-setup-env-<date>` before it is changed. PATH changes go to `~/.zprofile` with zsh, so that non-interactive login shells, such as `tailmon sharpness`, see them too.
 
 #### Caveats
 
