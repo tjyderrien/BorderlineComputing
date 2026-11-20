@@ -505,6 +505,108 @@ def check_toolkit(r):
           "ready" if ok else ("not writable" if MOUNT_ROOT.exists() else "missing"),
           "`tailmon mount` creates it" if IS_MAC else "`sudo install -d -o $USER -g $(id -gn) /media/tailscale`",
           roles=WS)
+    check_keyboard(r)
+
+
+# One keyboard for every machine: a PC AZERTY keyboard (ISO, with the extra <> key),
+# typed as French first and Czech second, as on the Asus. (XKB name, macOS input source ID)
+KEYBOARD = [("fr", "com.apple.keylayout.French-PC"), ("cz", "com.apple.keylayout.Czech")]
+KEYBOARD_LABEL = "Keyboard layouts as on your other machines (French AZERTY PC, Czech)"
+KEYBOARD_TYPE_LABEL = "Keyboard type ISO (PC AZERTY keyboard, with the <> key)"
+
+
+def gnome_env():
+    """Environment reaching the desktop session's settings, also from ssh or cron."""
+    env = dict(os.environ)
+    bus = "/run/user/%d/bus" % os.getuid()
+    if not env.get("DBUS_SESSION_BUS_ADDRESS") and os.path.exists(bus):
+        env["DBUS_SESSION_BUS_ADDRESS"] = "unix:path=" + bus
+    return env
+
+
+def keyboard_layouts():
+    """(enabled layouts with the default first, as XKB names like 'fr' or 'fr+oss', where they come from)."""
+    if IS_MAC:
+        rc, out, _ = run(["defaults", "read", "com.apple.HIToolbox", "AppleEnabledInputSources"])
+        names = re.findall(r'"KeyboardLayout Name" = "?([^";]+)"?;', out) if rc == 0 else []
+        rc, sel, _ = run(["defaults", "read", "com.apple.HIToolbox", "AppleSelectedInputSources"])
+        cur = re.findall(r'"KeyboardLayout Name" = "?([^";]+)"?;', sel) if rc == 0 else []
+        xkb = {"frenchpc": "fr", "french": "fr(mac)", "czech": "cz", "czechqwerty": "cz(qwerty)",
+               "abc": "us", "us": "us"}
+        conv = [xkb.get(re.sub(r"[^a-z]", "", n.lower()), n) for n in cur + [n for n in names if n not in cur]]
+        return conv, "macOS input sources"
+    for cmd in (["dconf", "read", "/org/gnome/desktop/input-sources/sources"],
+                ["gsettings", "get", "org.gnome.desktop.input-sources", "sources"]):
+        if shutil.which(cmd[0]):
+            p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, universal_newlines=True,
+                               env=gnome_env())
+            found = re.findall(r"\('xkb', '([^']+)'\)", p.stdout)
+            if found:
+                return found, "GNOME input sources"
+    rc, out, _ = run(["localectl", "status"])
+    m = re.search(r"X11 Layout:\s*(\S+)", out)
+    return (m.group(1).split(",") if m else []), "localectl"
+
+
+def connected_keyboards():
+    """macOS: {"<product>-<vendor>-0": name} for the keyboards plugged in now (keys of com.apple.keyboardtype)."""
+    rc, out, _ = run(["ioreg", "-r", "-c", "IOHIDDevice", "-d", "1", "-l"])
+    kbs = {}
+    for dev in out.split("+-o ")[1:]:
+        f = dict(re.findall(r'"(Product|VendorID|ProductID|PrimaryUsage|PrimaryUsagePage|Transport)" = "?([^"\n]*)"?', dev))
+        name = f.get("Product", "?")
+        if (f.get("PrimaryUsagePage") == "1" and f.get("PrimaryUsage") == "6" and f.get("VendorID", "0") != "0"
+                and not re.search(r"mouse|trackpad|virtual", name, re.I)):
+            kbs["%s-%s-0" % (f.get("ProductID"), f.get("VendorID"))] = name
+    return kbs
+
+
+def keyboard_types():
+    """macOS: {"<product>-<vendor>-0": 40 ANSI | 41 ISO | 42 JIS} as chosen in the Keyboard Setup Assistant."""
+    rc, out, _ = run(["defaults", "read", "/Library/Preferences/com.apple.keyboardtype", "keyboardtype"])
+    return {k: int(v) for k, v in re.findall(r'"([\d-]+)" = (\d+);', out)} if rc == 0 else {}
+
+
+def check_keyboard(r):
+    lay, src = keyboard_layouts()
+    first = 1 if lay and lay[0].split("+")[0] == "fr" else 0
+    cz = 1 if "cz" in [l.split("+")[0] for l in lay] else 0
+    r.add("toolkit", KEYBOARD_LABEL, 2, 0.6 * first + 0.4 * cz,
+          "%s: %s" % (src, ", ".join(lay) or "none found"),
+          ("Enable 'French - PC' (not Apple's 'French') and 'Czech' in System Settings > Keyboard > "
+           "Text Input, or run setup-env.py." if IS_MAC else
+           "`gsettings set org.gnome.desktop.input-sources sources \"[('xkb', 'fr'), ('xkb', 'cz')]\"`, "
+           "or run setup-env.py."), roles=WS)
+    if IS_MAC:
+        kar = karabiner_keyboard_type()
+        if kar:  # Karabiner grabs the keyboards and types through its virtual one: that one's type counts
+            r.add("toolkit", KEYBOARD_TYPE_LABEL, 1, 1 if kar == "iso" else 0,
+                  "Karabiner virtual keyboard: %s" % kar.upper(),
+                  "Karabiner-Elements > Virtual Keyboard > Keyboard type: ISO; "
+                  "otherwise macOS swaps the <> and ² keys.", roles=WS)
+            return
+        kbs, types = connected_keyboards(), keyboard_types()
+        names = {40: "ANSI", 41: "ISO", 42: "JIS"}
+        ok = [k for k in kbs if types.get(k) == 41]
+        r.add("toolkit", KEYBOARD_TYPE_LABEL, 1, len(ok) / len(kbs) if kbs else 1,
+              ", ".join("%s: %s" % (kbs[k], names.get(types.get(k), "not set")) for k in kbs) or "no keyboard plugged in",
+              "Plug the keyboard in, then System Settings > Keyboard > Keyboard Type... > ISO; "
+              "otherwise macOS swaps the <> and ² keys.", roles=WS)
+
+
+def karabiner_keyboard_type():
+    """'iso'/'ansi'/'jis' when Karabiner-Elements is running (it then types through its virtual keyboard)."""
+    rc, out, _ = run(["pgrep", "-f", "Karabiner-Core-Service"])
+    path = HOME / ".config" / "karabiner" / "karabiner.json"
+    if rc != 0 or not path.exists():
+        return None
+    try:
+        profiles = json.loads(path.read_text()).get("profiles", [])
+    except ValueError:
+        return None
+    prof = next((p for p in profiles if p.get("selected")), profiles[0] if profiles else {})
+    vk = prof.get("virtual_hid_keyboard", {})
+    return vk.get("keyboard_type_v2") or vk.get("keyboard_type") or "ansi"
 
 
 # ----------------------------------------------------------------- output ----

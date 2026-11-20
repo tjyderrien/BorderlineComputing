@@ -322,6 +322,56 @@ def do_mounts():
     return "tailmon mount: %d machine(s); run it again after a reboot" % len(lines)
 
 
+MAC_TIS = r"""
+import Carbon
+// enable every source given, select the first, disable the ones given as -ID
+func source(_ id: String) -> TISInputSource? {
+    let f = [kTISPropertyInputSourceID as String: id] as CFDictionary
+    return (TISCreateInputSourceList(f, true)?.takeRetainedValue() as? [TISInputSource])?.first
+}
+var first = true
+for arg in CommandLine.arguments.dropFirst() {
+    let off = arg.hasPrefix("-"), id = off ? String(arg.dropFirst()) : arg
+    guard let s = source(id) else { print("missing input source \(id)"); exit(1) }
+    if off { TISDisableInputSource(s); continue }
+    TISEnableInputSource(s)
+    if first { TISSelectInputSource(s); first = false }
+}
+"""
+
+
+def do_keyboard():
+    """The layouts of es.KEYBOARD, default first; other layouts already there stay (after them)."""
+    if IS_MAC:
+        swift = shutil.which("swift")
+        if not swift:
+            raise RuntimeError("needs Swift: `xcode-select --install`, or System Settings > Keyboard > Text Input")
+        wanted = [mac for _, mac in es.KEYBOARD]
+        script = HOME / ".local" / "share" / "setup-env" / "keyboard.swift"
+        script.parent.mkdir(parents=True, exist_ok=True)
+        script.write_text(MAC_TIS)
+        r = subprocess.run([swift, str(script)] + wanted + ["-com.apple.keylayout.French"],
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
+        if r.returncode != 0:
+            raise RuntimeError((r.stdout.strip().splitlines() or ["swift failed"])[-1])
+        return "input sources: %s selected; Apple's French layout off" % ", ".join(w.split(".")[-1] for w in wanted)
+    before, src = es.keyboard_layouts()
+    if src != "GNOME input sources" and not shutil.which("dconf"):
+        raise RuntimeError("not a GNOME desktop: `sudo localectl set-x11-keymap fr,cz`")
+    fr = next((l for l in before if l.split("+")[0] == "fr"), "fr")   # keep a variant such as fr+oss
+    want = [fr] + [x for x, _ in es.KEYBOARD[1:]]
+    new = want + [l for l in before if l not in want and l.split("+")[0] not in [w.split("+")[0] for w in want]]
+    value = "[%s]" % ", ".join("('xkb', '%s')" % l for l in new)
+    # dconf first: a gsettings from conda/anaconda may write to a throw-away "memory" backend
+    cmd = (["dconf", "write", "/org/gnome/desktop/input-sources/sources", value] if shutil.which("dconf") else
+           ["/usr/bin/gsettings" if os.path.exists("/usr/bin/gsettings") else "gsettings",
+            "set", "org.gnome.desktop.input-sources", "sources", value])
+    r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True, env=es.gnome_env())
+    if r.returncode != 0:
+        raise RuntimeError(r.stdout.strip()[-150:])
+    return "GNOME layouts %s (were %s)" % (", ".join(new), ", ".join(before) or "none")
+
+
 # ------------------------------------------------------------- the list ----
 
 class Action:
@@ -381,6 +431,9 @@ ACTIONS = [
     Action("mounts", "workstation", ["*: mounted locally", "Mount root for `tailmon mount` (%s)" % es.MOUNT_ROOT_LABEL],
            "`tailmon mount`: every server under %s" % es.MOUNT_ROOT_LABEL, lambda f: do_mounts(),
            roles=es.WS, needs=("fuse-sshfs", "toolkit")),
+    Action("keyboard", "workstation", [es.KEYBOARD_LABEL],
+           "same keyboard layouts as the other machines (French AZERTY PC, Czech)", lambda f: do_keyboard(),
+           roles=es.WS),
 ]
 BY_NAME = {a.name: a for a in ACTIONS}
 LAYERS = ("core", "macos", "workstation")
