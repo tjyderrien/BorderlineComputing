@@ -46,6 +46,9 @@ ALL = ROLES
 WS = ("workstation",)
 NOT_HPC = ("workstation", "server")
 ROLE = "workstation"  # set in main()
+# Where `tailmon mount` puts the servers: macOS's system disk is read-only, so there it is in your home.
+MOUNT_ROOT = HOME / "tailscale" if IS_MAC else Path("/media/tailscale")
+MOUNT_ROOT_LABEL = "~/tailscale" if IS_MAC else "/media/tailscale"
 
 CATEGORIES = [
     ("network", "Reaching the servers"),
@@ -59,6 +62,12 @@ CATEGORIES = [
 
 
 # ---------------------------------------------------------------- helpers ----
+
+def tailscale_cli():
+    """The tailscale command; the Mac App Store app keeps it inside the app, off the PATH."""
+    app = "/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+    return shutil.which("tailscale") or (app if IS_MAC and os.access(app, os.X_OK) else None)
+
 
 def run(cmd, timeout=10):
     """Run cmd, return (exit code, stdout+stderr, seconds). Never raises."""
@@ -185,9 +194,9 @@ def ssh_effective(host):
 
 def tailnet():
     """(this machine's name, [online Linux peers]) from Tailscale, or (None, []) without it."""
-    if not have("tailscale"):
+    if not tailscale_cli():
         return None, []
-    rc, out, _ = run(["tailscale", "status", "--json"], timeout=5)
+    rc, out, _ = run([tailscale_cli(), "status", "--json"], timeout=5)
     try:
         st = json.loads(out) if rc == 0 else {}
     except ValueError:
@@ -235,10 +244,10 @@ def find_agent():
 # ----------------------------------------------------------------- checks ----
 
 def check_network(r, hosts, offline):
-    ts = have("tailscale")
+    ts = tailscale_cli()
     running = False
     if ts:
-        rc, out, _ = run(["tailscale", "status", "--json"], timeout=5)
+        rc, out, _ = run([ts, "status", "--json"], timeout=5)
         try:
             running = rc == 0 and json.loads(out).get("BackendState") == "Running"
         except ValueError:
@@ -357,7 +366,10 @@ def sshfs_mounts():
     rc, out, _ = run(["mount"], timeout=5)
     mounts = {}
     for line in out.splitlines():
-        m = re.match(r"(\S+@?\S*:\S*) on (.+?) (?:type \S*sshfs|\((?:macfuse|osxfuse|fuse-t))", line)
+        if IS_MAC:  # macFUSE: "(macfuse, ...)"; FUSE-T serves sshfs over a local NFS: "(nfs, ...)"
+            m = re.match(r"(\S+:\S*) on (.+?) \((?:macfuse|osxfuse|fuse-t|nfs)\b", line)
+        else:
+            m = re.match(r"(\S+:\S*) on (.+?) type \S*sshfs", line)
         if m:
             mounts[m.group(2)] = m.group(1)
     return mounts
@@ -366,8 +378,9 @@ def sshfs_mounts():
 def check_files(r, hosts, offline):
     sshfs = have("sshfs")
     r.add("files", "sshfs installed", 2, 1 if sshfs else 0, shutil.which("sshfs") or "missing",
-          "macOS: install macFUSE or FUSE-T, then sshfs (`brew install --cask macfuse` + "
-          "`brew install gromgit/fuse/sshfs-mac`)." if IS_MAC else "`sudo apt install sshfs`", roles=WS)
+          "`brew install --cask macos-fuse-t/homebrew-cask/fuse-t && brew install "
+          "macos-fuse-t/homebrew-cask/fuse-t-sshfs` (FUSE-T: no kernel extension, no reboot)."
+          if IS_MAC else "`sudo apt install sshfs`", roles=WS)
     rc, out, _ = run(["rsync", "--version"], timeout=5)
     m = re.search(r"version\s+v?(\d+)\.(\d+)", out)
     ver = (int(m.group(1)), int(m.group(2))) if m else None
@@ -385,8 +398,8 @@ def check_files(r, hosts, offline):
                    if src.split("@")[-1].split(":")[0] in names), None)
         if not mp:
             r.add("files", f"{h}: mounted locally", 2, 0, "not mounted",
-                  f"`mkdir -p ~/mnt/{h} && sshfs {h}:/ ~/mnt/{h} -o reconnect,"
-                  "ServerAliveInterval=15` - then open server files in local apps.")
+                  f"`tailmon mount` (every server under {MOUNT_ROOT_LABEL}), or `mkdir -p ~/mnt/{h} && "
+                  f"sshfs {h}:/ ~/mnt/{h} -o reconnect` - then open server files in local apps.")
             continue
         if offline:
             r.add("files", f"{h}: mounted locally", 2, 1, mp)
@@ -487,11 +500,11 @@ def check_toolkit(r):
     es = shutil.which("env-sharpness")
     r.add("toolkit", "env-sharpness on the PATH (`tailmon sharpness`)", 1, 1 if es else 0,
           es or "missing", "`ln -s ~/BorderlineComputing/env-sharpness.py ~/.local/bin/env-sharpness`", roles=WS)
-    root = Path("/media/tailscale")
-    ok = root.is_dir() and os.access(str(root), os.W_OK)
-    r.add("toolkit", "Mount root for `tailmon mount` (/media/tailscale)", 1, 1 if ok else 0,
-          "ready" if ok else ("not writable" if root.exists() else "missing"),
-          "`sudo install -d -o $USER -g $(id -gn) /media/tailscale`", roles=WS)
+    ok = MOUNT_ROOT.is_dir() and os.access(str(MOUNT_ROOT), os.W_OK)
+    r.add("toolkit", "Mount root for `tailmon mount` (%s)" % MOUNT_ROOT_LABEL, 1, 1 if ok else 0,
+          "ready" if ok else ("not writable" if MOUNT_ROOT.exists() else "missing"),
+          "`tailmon mount` creates it" if IS_MAC else "`sudo install -d -o $USER -g $(id -gn) /media/tailscale`",
+          roles=WS)
 
 
 # ----------------------------------------------------------------- output ----

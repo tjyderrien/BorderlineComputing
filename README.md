@@ -183,28 +183,39 @@ Brings a machine above its sharpness target with as few changes as possible. It 
 ```bash
 ./setup-env.py                          # plan: what would be done, and the predicted score
 ./setup-env.py --apply                  # do it, then measure again
-./setup-env.py --all --apply            # every core fix, whatever the target
+./setup-env.py --all --apply            # every fix that applies here, whatever the target
+./setup-env.py --layers core            # home-directory fixes only (computing centres)
 ./setup-env.py --role hpc --target 75   # same options as env-sharpness.py
-./setup-env.py --undo                   # remove every block and binary it added
+./setup-env.py --undo                   # remove every block, binary and link it added
 ```
 
 Nothing changes without `--apply`.
 
-#### What it can fix (core layer)
+#### What it can fix
 
-Everything happens in your home directory, with no sudo and no background service, so it is also meant for shared computing centres where you cannot install packages.
+Fixes come in three layers. All of them are allowed by default; `--layers` restricts them.
 
-| Fix | What it does |
-|---|---|
-| `ssh-defaults` | `Host *` block at the end of `~/.ssh/config`: ControlMaster, ControlPersist 10m, ServerAliveInterval 30 (plus keychain on macOS) |
-| `history` | 100,000-line shell history in `~/.bashrc` or `~/.zshrc` |
-| `user-bin` | fzf 0.56.3 and ripgrep 14.1.1 in `~/.local/bin`, downloaded from their GitHub releases and checked against pinned SHA-256 sums; `~/.local/bin` on the PATH and the fzf key bindings |
-| `aliases` | ten portable aliases (`ll`, `la`, `..`, `h`, `path`...) |
+| Layer | Fix | What it does |
+|---|---|---|
+| core | `ssh-defaults` | `Host *` block at the end of `~/.ssh/config`: ControlMaster, ControlPersist 10m, ServerAliveInterval 30 (plus keychain on macOS) |
+| core | `history` | 100,000-line shell history |
+| core | `user-bin` | fzf 0.56.3 and ripgrep 14.1.1 in `~/.local/bin`, downloaded from their GitHub releases and checked against pinned SHA-256 sums, plus the fzf key bindings |
+| core | `aliases` | ten portable aliases (`ll`, `la`, `..`, `h`, `path`...) |
+| macos | `gnu-tools` | `brew install coreutils gnu-sed grep findutils`, and their `gnubin` directories first in PATH |
+| macos | `bash`, `rsync` | bash 5 and rsync 3 from Homebrew (macOS ships bash 3.2 and openrsync) |
+| macos | `fuse-sshfs` | FUSE-T and its sshfs: no kernel extension, no reboot. Asks for your password |
+| macos | `xquartz` | XQuartz, for `ssh -X`. Asks for your password |
+| workstation | `toolkit` | clones TailScale-Monitor and ClaudeXplorer into `~/Documents` (if missing) and links `tailmon`, `claude-explorer` and `env-sharpness` into `~/.local/bin` |
+| workstation | `mounts` | `tailmon mount`: every server under `/media/tailscale`, or `~/tailscale` on macOS. Needs `fuse-sshfs` on macOS and `toolkit`, which are planned with it |
 
-Each change to a file is a block between `# >>> setup-env: <name> >>>` and `# <<< setup-env: <name> <<<`, so you can see it and `--undo` removes it. Every file is backed up as `<file>.bak-setup-env-<date>` before it is changed. Fixes that need sudo or Homebrew (sshfs, VNC, GNU tools on macOS) are not in this layer yet; when only those remain, it lists them.
+The core layer touches only your home directory, with no sudo and no background service, so it is meant for shared computing centres too. The macos layer needs [Homebrew](https://brew.sh), which asks for your password once when you install it. Fixes that ask for a password are skipped, with a note, when the script is not run from a terminal.
+
+Each change to a file is a block between `# >>> setup-env: <name> >>>` and `# <<< setup-env: <name> <<<`, so you can see it, and `--undo` removes it with the links and binaries. Homebrew packages and cloned repositories stay. Every file is backed up as `<file>.bak-setup-env-<date>` before it is changed. PATH changes go to `~/.zprofile` with zsh, so that non-interactive login shells, such as `tailmon sharpness`, see them too.
 
 #### Caveats
 
-- Run it from a normal terminal on the machine itself. It needs Python 3.6 or later.
+- Run it from a normal terminal on the machine itself, from a clone of this repository. It needs Python 3.6 or later.
+- With `gnu-tools`, `sed`, `grep`, `find`, `date`... are the GNU ones in your shells. macOS's own stay in `/usr/bin` for scripts that call them by full path.
+- Mounts do not survive a reboot: run `tailmon mount` again.
 - `user-bin` needs to reach github.com. On a cluster without Internet access that fix fails and the others still apply.
 - Not yet tried on IT4I. It only writes to `$HOME`, but check the plan there before `--apply`.
