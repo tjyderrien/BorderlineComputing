@@ -148,7 +148,7 @@ macOS has no action for Print Screen, so the script adds two rules to [Karabiner
 - macOS with Karabiner-Elements installed and opened once (driver and input monitoring allowed): `brew install --cask karabiner-elements`.
 - `python3` (comes with the Xcode command line tools).
 
-> **Geek corner.** On the Mac this was written on, the Karabiner profile holds **4,034 rules but only 65 distinct ones**: the 63 Windows-style shortcuts (Ctrl+C, Home/End, Win+L…) are each present exactly **64 = 2⁶ times**, plus the 2 Print Screen rules. That is 98.4 % duplicates in a 10.9 MB `karabiner.json`. A rule set that got imported again and again, apparently doubling each time. Karabiner doesn't mind: the first matching rule wins and the other 63 copies are never reached.
+> **Geek corner.** On the Mac this was written on, the Karabiner profile held **4,034 rules but only 65 distinct ones**: the 63 Windows-style shortcuts (Ctrl+C, Home/End, Win+L…) were each present exactly **64 = 2⁶ times**, plus the 2 Print Screen rules. That was 98.4 % duplicates in a 10.9 MB `karabiner.json`: a rule set imported again and again, apparently doubling each time. Karabiner didn't mind, since the first matching rule wins and the other 63 copies were never reached. Keeping only the first copy of each rule, in order, shrank the file to 173 KB (63× smaller) with exactly the same behaviour.
 
 ### `bluetooth-switch.sh`
 
